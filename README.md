@@ -16,6 +16,7 @@ data stays on your machine. This system has nowhere to put a bank password.
 | Auth | argon2id, revocable opaque sessions, email verification |
 | Remote MCP | OAuth 2.1 + PKCE (S256), audience-bound tokens |
 | Deploy | one Render web service + private managed Postgres |
+| Email | Resend (3,000/mo free); `check_email.py` verifies it before deploy |
 
 ```
 test_scrub    20 descriptors, 12 amounts    test_pipeline  16 checks
@@ -92,6 +93,34 @@ render blueprint launch     # or point Render at render.yaml in the dashboard
 database has an empty `ipAllowList`, so it is reachable only from inside
 Render's private network. Set `RESEND_API_KEY` and `RECUR_EMAIL_FROM` in the
 dashboard — they are `sync: false` and are never committed.
+
+### Email setup (Resend)
+
+Resend's free tier is 3,000/month, 100/day, permanently — Postmark gives 100 a
+month and SendGrid retired its free plan in 2025.
+
+1. Sign up at [resend.com](https://resend.com) (no card).
+2. **API Keys → Create API Key**, permission **Sending access**. Copy it —
+   it is shown once.
+3. **Add a domain.** This is the step people skip. Until a domain is verified,
+   Resend delivers only to the address that owns the Resend account, so with
+   open signup every user except you gets a "check your email" screen and no
+   email — and the API reports success either way. Add the DNS records Resend
+   gives you (an MX and two TXT: SPF and DKIM) at your registrar and wait for
+   verification.
+4. Check it before deploying:
+
+```bash
+RESEND_API_KEY=re_xxx RECUR_EMAIL_FROM='Recur <noreply@yourdomain.com>' \
+    .venv/bin/python check_email.py you@example.com
+```
+
+5. In Render: **Environment → Add** `RESEND_API_KEY` and `RECUR_EMAIL_FROM`.
+   Both are `sync: false` in the blueprint, so they live in the dashboard and
+   never in the repo.
+
+No domain yet? Deploy with `RECUR_REGISTRATION_OPEN=0`. The app runs, you can
+use it, and nobody hits a broken signup.
 
 **Before you take real users:** you become a data controller. Erasure
 (`DELETE /api/me`) and portability (`GET /api/export`) are built; a privacy
