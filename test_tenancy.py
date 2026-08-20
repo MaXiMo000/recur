@@ -57,8 +57,8 @@ def main() -> None:
     db.apply_schema()
     db.open_pool()
     try:
-        alice = make_user("alice@example.test")
-        bob = make_user("bob@example.test")
+        alice = make_user("alice@example.com")
+        bob = make_user("bob@example.com")
         seed(alice, "alice-chase", "ALICE SECRET THERAPY")
         seed(bob, "bob-amex", "BOB GAMBLING SITE")
 
@@ -137,7 +137,7 @@ def main() -> None:
         check("deleting a user erases their transactions", n, 0)
 
         with db.admin() as conn:
-            conn.execute("DELETE FROM app_user WHERE email LIKE '%@example.test'")
+            conn.execute("DELETE FROM app_user WHERE email LIKE '%@example.com'")
             conn.commit()
     finally:
         db.close_pool()

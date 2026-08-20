@@ -33,10 +33,10 @@ def main() -> None:
     db.open_pool()
     try:
         with db.admin() as conn:
-            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.test",))
+            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.com",))
             conn.commit()
 
-        uid, verify_token = auth.register("carol@example.test", PW)
+        uid, verify_token = auth.register("carol@example.com", PW)
 
         # --- the stored hash must not contain or reveal the password
         with db.admin() as conn:
@@ -47,11 +47,11 @@ def main() -> None:
 
         # --- unverified accounts cannot sign in
         raises("unverified account is refused", auth.authenticate,
-               "carol@example.test", PW)
+               "carol@example.com", PW)
 
         auth.consume_email_token(verify_token, "verify")
         check("verification succeeds", isinstance(
-            auth.authenticate("carol@example.test", PW), int), True)
+            auth.authenticate("carol@example.com", PW), int), True)
 
         # --- verification tokens are single-use
         raises("a verification token cannot be replayed",
@@ -59,8 +59,8 @@ def main() -> None:
 
         # --- wrong password and unknown user must be indistinguishable
         msgs = set()
-        for email, pw in [("carol@example.test", "wrong-password-here"),
-                          ("nobody@example.test", PW)]:
+        for email, pw in [("carol@example.com", "wrong-password-here"),
+                          ("nobody@example.com", PW)]:
             try:
                 auth.authenticate(email, pw)
             except auth.AuthError as e:
@@ -75,13 +75,13 @@ def main() -> None:
             except auth.AuthError:
                 pass
             return time.perf_counter() - t
-        known = min(timed("carol@example.test", "wrong-password-here") for _ in range(3))
-        unknown = min(timed("nobody@example.test", PW) for _ in range(3))
+        known = min(timed("carol@example.com", "wrong-password-here") for _ in range(3))
+        unknown = min(timed("nobody@example.com", PW) for _ in range(3))
         ratio = max(known, unknown) / max(min(known, unknown), 1e-9)
         check(f"unknown-email timing is not a tell (ratio {ratio:.2f})", ratio < 3.0, True)
 
         # --- registering an existing address must not disclose that it exists
-        uid2, _ = auth.register("carol@example.test", PW)
+        uid2, _ = auth.register("carol@example.com", PW)
         check("re-registering returns the same user, no error", uid2, uid)
 
         # --- sessions: only the hash is stored, and it resolves

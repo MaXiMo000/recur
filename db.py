@@ -65,22 +65,42 @@ def _reset(conn: psycopg.Connection) -> None:
     conn.commit()
 
 
-pool = ConnectionPool(
-    DSN,
-    min_size=1,
-    max_size=int(os.environ.get("RECUR_POOL_MAX", "10")),
-    reset=_reset,
-    open=False,
-    kwargs={"application_name": "recur"},
-)
+# A psycopg pool cannot be reopened once closed, so the pool is rebuilt rather
+# than reused. Anything that restarts -- a test suite, a worker that recycles,
+# a reload -- would otherwise die on the second start.
+_pool: ConnectionPool | None = None
+
+
+def _new_pool() -> ConnectionPool:
+    return ConnectionPool(
+        DSN,
+        min_size=1,
+        max_size=int(os.environ.get("RECUR_POOL_MAX", "10")),
+        reset=_reset,
+        open=False,
+        kwargs={"application_name": "recur"},
+    )
 
 
 def open_pool() -> None:
-    pool.open()
+    global _pool
+    if _pool is None:
+        _pool = _new_pool()
+        _pool.open()
 
 
 def close_pool() -> None:
-    pool.close()
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
+
+
+def _get() -> ConnectionPool:
+    if _pool is None:
+        open_pool()
+    assert _pool is not None
+    return _pool
 
 
 @contextmanager
@@ -95,7 +115,7 @@ def tenant(user_id: int):
     """
     if not isinstance(user_id, int) or user_id <= 0:
         raise ValueError("tenant() needs a real user id")
-    with pool.connection() as conn:
+    with _get().connection() as conn:
         conn.execute("SELECT set_config('recur.user_id', %s, false)", (str(user_id),))
         yield conn
 
@@ -103,7 +123,7 @@ def tenant(user_id: int):
 @contextmanager
 def admin():
     """No tenant. Use for identity tables only; tenant tables return zero rows."""
-    with pool.connection() as conn:
+    with _get().connection() as conn:
         yield conn
 
 

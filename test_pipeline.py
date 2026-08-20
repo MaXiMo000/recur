@@ -42,12 +42,12 @@ def main() -> None:
     db.open_pool()
     try:
         with db.admin() as conn:
-            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.test",))
+            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.com",))
             conn.commit()
 
-        alice, t1 = auth.register("a@example.test", "a-long-enough-password")
+        alice, t1 = auth.register("a@example.com", "a-long-enough-password")
         auth.consume_email_token(t1, "verify")
-        bob, t2 = auth.register("b@example.test", "a-long-enough-password")
+        bob, t2 = auth.register("b@example.com", "a-long-enough-password")
         auth.consume_email_token(t2, "verify")
 
         ra = pipeline.run(alice, ALICE_CSV, "alice-card")
@@ -122,7 +122,7 @@ def main() -> None:
         check("deleting bob leaves alice's transactions", n, 7)
 
         with db.admin() as conn:
-            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.test",))
+            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.com",))
             conn.commit()
     finally:
         db.close_pool()
