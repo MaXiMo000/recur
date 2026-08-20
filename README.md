@@ -8,7 +8,7 @@ data stays on your machine. This system has nowhere to put a bank password.
 
 ---
 
-## Status: week 4 of 5
+## Status: complete (5 of 5)
 
 | Week | Scope | |
 |---|---|---|
@@ -16,7 +16,7 @@ data stays on your machine. This system has nowhere to put a bank password.
 | 2 | Merchant resolution: tiers 1-2 + human review queue | **done** |
 | 3 | Periodicity detection, price-change detection, forecast + benchmark | **done** |
 | 4 | FastAPI read-only API + React dashboard | **done** |
-| 5 | MCP server, Docker packaging, demo | |
+| 5 | MCP server (stdio), end-to-end script | **done** |
 
 Full design: [`../recur-spec.md`](../recur-spec.md)
 
@@ -25,7 +25,8 @@ Full design: [`../recur-spec.md`](../recur-spec.md)
 ```bash
 docker compose up -d
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python ingest.py sample.csv --account demo
+./run_all.sh                     # ingest -> resolve -> detect, on sample.csv
+.venv/bin/python resolve.py --review   # answer anything the ladder wouldn't guess
 ```
 
 Then with your own statement:
@@ -273,3 +274,73 @@ Colours come from a validated palette — one categorical slot, checked with the
 data-viz validator (lightness band, chroma floor, contrast vs surface: all pass).
 Light and dark are both defined explicitly rather than auto-flipped. Price
 changes carry an **arrow and a signed percentage**, never colour alone.
+
+## Week 5: MCP server
+
+```bash
+.venv/bin/python mcp_server.py     # stdio
+```
+
+Register it with Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "recur": {
+      "command": "/absolute/path/to/recur/.venv/bin/python",
+      "args": ["/absolute/path/to/recur/mcp_server.py"]
+    }
+  }
+}
+```
+
+Six tools: `list_subscriptions`, `spending_summary`, `upcoming_charges`,
+`price_increases`, `find_forgotten`, `data_quality`. Each calls the same
+function `api.py` calls — one implementation, two transports, nothing to keep
+in sync.
+
+### Security posture
+
+**stdio only.** No port, no token, nothing to leave unauthenticated. 41% of
+public MCP servers ship with no auth at all; the cheapest way not to be one is
+to have no network surface.
+
+**Tool descriptions are static string literals** — never f-strings, never
+interpolated with a merchant name. A descriptor comes off a CSV that a merchant
+wrote; a tool description is read by the model *as instructions*. That's the
+injection boundary, and `test_mcp.py` asserts it by checking that no live
+merchant name appears in any tool description.
+
+**Every tool is read-only.** Ingest and merchant resolution stay deliberate
+local commands; no conversation can trigger a write to financial data.
+
+### A number that's wrong has to say so
+
+Run from a cold database, `detect.py` reports **9 subscriptions and $1,361/yr**.
+After the review queue is worked it reports **10 and $2,097/yr** — a 54%
+difference, caused entirely by three descriptors nobody had resolved yet.
+
+So the totals now carry a warning whenever the queue is non-empty, and
+`data_quality` exposes the same thing over MCP. The queue was already the right
+design; what was missing was that an unworked queue silently understated every
+figure on screen and nothing said so.
+
+---
+
+## Everything, verified
+
+```
+test_scrub.py      16 cases
+test_resolve.py     9 checks
+test_detect.py     17 checks
+test_mcp.py        10 checks, 6 tools
+benchmark.py       precision 1.000  recall 1.000  F1 1.000  cadence 10/10
+```
+
+```
+669 transactions -> 26 merchants (ground truth: 26) -> 10 subscriptions
+$2,097.31/year  ·  Netflix +8.0% found  ·  0 silent merchant splits
+```
+
+Benchmark numbers are against generated data, so they are a regression guard,
+not a claim about field accuracy. The real test is your own statement.

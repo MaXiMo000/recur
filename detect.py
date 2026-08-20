@@ -323,6 +323,19 @@ def report(conn) -> None:
     print(f"\n  {'':<26} {'':<12} {'ACTIVE TOTAL':>9} {annual/100:>8,.0f} /year")
     print("  ~ = usage-based (amount varies), so no price tracking")
 
+    # An unworked queue makes every total above too low, and nothing else on
+    # screen would say so: those charges exist, they just aren't attached to a
+    # merchant yet. A number that is wrong because a question is unanswered has
+    # to admit it.
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*), coalesce(sum(txn_count), 0) FROM resolution_queue"
+                    " WHERE status = 'pending'")
+        n_queue, n_txn = cur.fetchone()
+    if n_queue:
+        print(f"\n  ⚠ {n_queue} descriptors ({n_txn} charges) are still in the review"
+              f" queue, so these\n    totals are UNDERSTATED."
+              f"  ->  python resolve.py --review")
+
 
 def upcoming(conn, days: int = 30) -> None:
     with conn.cursor() as cur:
