@@ -1,97 +1,207 @@
--- Week 1 tables only. subscription / price_change / resolution_queue /
--- merchant_embedding land in weeks 2-3, when something actually writes to them.
+-- Recur: multi-tenant schema.
+--
+-- Tenant isolation is enforced by Postgres row-level security, not by
+-- remembering a WHERE clause. Every data table carries user_id, every one has a
+-- policy keyed on `recur.user_id`, and FORCE is set so the policies apply to the
+-- table owner too -- otherwise the application role, which owns these tables,
+-- would silently bypass every one of them.
+--
+-- The consequence worth stating plainly: a query that forgets its tenant filter
+-- returns zero rows. It cannot return someone else's.
+
+CREATE EXTENSION IF NOT EXISTS citext;
+
+-- --------------------------------------------------------------- identity --
+
+CREATE TABLE IF NOT EXISTS app_user (
+    id                BIGSERIAL PRIMARY KEY,
+    email             CITEXT NOT NULL UNIQUE,
+    -- argon2id. Never a raw password, never a reversible transform.
+    password_hash     TEXT NOT NULL,
+    email_verified_at TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at       TIMESTAMPTZ
+);
+
+-- Only the SHA-256 of a session token is stored, so a database dump does not
+-- hand the reader a working set of live sessions.
+CREATE TABLE IF NOT EXISTS session (
+    token_hash   TEXT PRIMARY KEY,
+    user_id      BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    user_agent   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_session_user ON session (user_id);
+CREATE INDEX IF NOT EXISTS idx_session_expiry ON session (expires_at);
+
+-- Email verification and password reset: same table, same single-use rule.
+CREATE TABLE IF NOT EXISTS email_token (
+    token_hash TEXT PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    purpose    TEXT NOT NULL CHECK (purpose IN ('verify', 'reset')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_email_token_user ON email_token (user_id, purpose);
+
+-- ------------------------------------------------------------------- data --
 
 CREATE TABLE IF NOT EXISTS account (
-    id          SERIAL PRIMARY KEY,
-    label       TEXT NOT NULL UNIQUE,
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    label       TEXT NOT NULL,
     institution TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    currency    TEXT NOT NULL DEFAULT 'USD',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, label)
 );
 
+-- Merchants are per-tenant. Two users both having "NETFLIX" is ordinary, and a
+-- globally unique canonical_name would have made one of them fail to insert --
+-- or worse, quietly share a row.
 CREATE TABLE IF NOT EXISTS merchant (
-    id             SERIAL PRIMARY KEY,
-    canonical_name TEXT NOT NULL UNIQUE,
-    category       TEXT
+    id             BIGSERIAL PRIMARY KEY,
+    user_id        BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    canonical_name TEXT NOT NULL,
+    category       TEXT,
+    UNIQUE (user_id, canonical_name)
 );
 
--- The deterministic layer. Every resolution (fuzzy, vector, LLM, human) writes a
--- row here, so tier 1 grows and the expensive tiers shrink. Week 2 fills it.
 CREATE TABLE IF NOT EXISTS merchant_alias (
-    id               SERIAL PRIMARY KEY,
-    scrubbed_pattern TEXT NOT NULL UNIQUE,
-    merchant_id      INTEGER NOT NULL REFERENCES merchant(id) ON DELETE CASCADE,
+    id               BIGSERIAL PRIMARY KEY,
+    user_id          BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    scrubbed_pattern TEXT NOT NULL,
+    merchant_id      BIGINT NOT NULL REFERENCES merchant(id) ON DELETE CASCADE,
     resolved_by      TEXT NOT NULL
                      CHECK (resolved_by IN ('exact','fuzzy','vector','llm','human')),
     confidence       NUMERIC(4,3),
-    resolved_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    resolved_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, scrubbed_pattern)
 );
 
 CREATE TABLE IF NOT EXISTS raw_transaction (
     id             BIGSERIAL PRIMARY KEY,
-    account_id     INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    user_id        BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    account_id     BIGINT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
     posted_date    DATE NOT NULL,
-    -- Integer cents. Never float. Negative = money left the account.
+    -- Integer cents. Never float.
     amount_cents   BIGINT NOT NULL,
     currency       TEXT NOT NULL DEFAULT 'USD',
     raw_descriptor TEXT NOT NULL,
     scrubbed       TEXT NOT NULL,
-    merchant_id    INTEGER REFERENCES merchant(id) ON DELETE SET NULL,
+    merchant_id    BIGINT REFERENCES merchant(id) ON DELETE SET NULL,
     source_file    TEXT,
-    -- Re-uploading the same statement is a no-op; two genuine same-day identical
-    -- charges still both land (the hash includes an occurrence index).
-    dedup_hash     TEXT NOT NULL UNIQUE,
-    ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    dedup_hash     TEXT NOT NULL,
+    ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Scoped per user: two tenants uploading the same statement must not
+    -- collide, and re-uploading your own must still be a no-op.
+    UNIQUE (user_id, dedup_hash)
 );
-
-CREATE INDEX IF NOT EXISTS idx_txn_scrubbed ON raw_transaction (scrubbed);
+CREATE INDEX IF NOT EXISTS idx_txn_scrubbed ON raw_transaction (user_id, scrubbed);
 CREATE INDEX IF NOT EXISTS idx_txn_merchant_date
-    ON raw_transaction (merchant_id, posted_date);
+    ON raw_transaction (user_id, merchant_id, posted_date);
 
--- ---------------------------------------------------------------- week 2 --
-
--- Anything the deterministic tiers won't commit to. A human resolution here
--- writes a merchant_alias row, so the same string is never asked about twice.
 CREATE TABLE IF NOT EXISTS resolution_queue (
-    id             SERIAL PRIMARY KEY,
-    scrubbed       TEXT NOT NULL UNIQUE,
-    txn_count      INTEGER NOT NULL DEFAULT 1,
-    candidates     JSONB NOT NULL DEFAULT '[]',
-    top_score      NUMERIC(5,2),
-    reason         TEXT,
-    status         TEXT NOT NULL DEFAULT 'pending'
-                   CHECK (status IN ('pending','resolved','ignored')),
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    scrubbed   TEXT NOT NULL,
+    txn_count  INTEGER NOT NULL DEFAULT 1,
+    candidates JSONB NOT NULL DEFAULT '[]',
+    top_score  NUMERIC(5,2),
+    reason     TEXT,
+    status     TEXT NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','resolved','ignored')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (user_id, scrubbed)
 );
-
 CREATE INDEX IF NOT EXISTS idx_queue_pending
-    ON resolution_queue (status) WHERE status = 'pending';
-
--- ---------------------------------------------------------------- week 3 --
+    ON resolution_queue (user_id, status) WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS subscription (
-    id                 SERIAL PRIMARY KEY,
-    merchant_id        INTEGER NOT NULL REFERENCES merchant(id) ON DELETE CASCADE,
-    account_id         INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
-    cadence            TEXT NOT NULL,
-    period_days        NUMERIC(7,2) NOT NULL,
-    anchor_day         SMALLINT,
+    id                   BIGSERIAL PRIMARY KEY,
+    user_id              BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    merchant_id          BIGINT NOT NULL REFERENCES merchant(id) ON DELETE CASCADE,
+    account_id           BIGINT NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    cadence              TEXT NOT NULL,
+    period_days          NUMERIC(7,2) NOT NULL,
+    anchor_day           SMALLINT,
     current_amount_cents BIGINT NOT NULL,
-    amount_cv          NUMERIC(5,3) NOT NULL,
-    charge_count       INTEGER NOT NULL,
-    first_seen         DATE NOT NULL,
-    last_seen          DATE NOT NULL,
-    next_due           DATE,
-    status             TEXT NOT NULL CHECK (status IN ('active','lapsed','cancelled')),
-    confidence         NUMERIC(4,3) NOT NULL,
-    UNIQUE (merchant_id, account_id)
+    amount_cv            NUMERIC(5,3) NOT NULL,
+    charge_count         INTEGER NOT NULL,
+    first_seen           DATE NOT NULL,
+    last_seen            DATE NOT NULL,
+    next_due             DATE,
+    status               TEXT NOT NULL
+                         CHECK (status IN ('active','lapsed','cancelled')),
+    confidence           NUMERIC(4,3) NOT NULL,
+    UNIQUE (user_id, merchant_id, account_id)
 );
 
 CREATE TABLE IF NOT EXISTS price_change (
-    id               SERIAL PRIMARY KEY,
-    subscription_id  INTEGER NOT NULL REFERENCES subscription(id) ON DELETE CASCADE,
+    id               BIGSERIAL PRIMARY KEY,
+    user_id          BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    subscription_id  BIGINT NOT NULL REFERENCES subscription(id) ON DELETE CASCADE,
     effective_date   DATE NOT NULL,
     old_amount_cents BIGINT NOT NULL,
     new_amount_cents BIGINT NOT NULL,
     pct_change       NUMERIC(6,2) NOT NULL,
     UNIQUE (subscription_id, effective_date)
 );
+
+-- ---------------------------------------------------------- rate limiting --
+
+CREATE TABLE IF NOT EXISTS auth_attempt (
+    id   BIGSERIAL PRIMARY KEY,
+    key  TEXT NOT NULL,          -- email or client IP. Never a password.
+    kind TEXT NOT NULL,
+    at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_attempt ON auth_attempt (key, kind, at DESC);
+
+-- ------------------------------------------------------------------- RLS --
+--
+-- The application does NOT connect as the role that owns these tables.
+--
+-- A superuser bypasses row-level security unconditionally -- FORCE only binds
+-- the table owner, and nothing binds a superuser. The Postgres Docker image
+-- makes POSTGRES_USER a superuser and managed providers hand out a privileged
+-- role by default, so connecting the app as the obvious user leaves every
+-- policy below inert while pg_class still cheerfully reports
+-- relrowsecurity = true. NOBYPASSRLS on a dedicated login role is what actually
+-- turns the policies on.
+
+-- One definition of "who is the current tenant", rather than the same
+-- expression escaped through two layers of format() in seven policies.
+--
+-- NULLIF is load-bearing. RESET leaves the setting as an empty string rather
+-- than NULL, and ''::bigint raises rather than matching nothing -- and a policy
+-- that errors is not a policy that denies, it is an outage. Returning NULL
+-- makes every comparison false, which is the correct closed default.
+CREATE OR REPLACE FUNCTION recur_current_user_id() RETURNS BIGINT
+LANGUAGE sql STABLE AS $fn$
+    SELECT NULLIF(current_setting('recur.user_id', true), '')::BIGINT
+$fn$;
+
+DO $rls$
+DECLARE t TEXT;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'account', 'merchant', 'merchant_alias', 'raw_transaction',
+        'resolution_queue', 'subscription', 'price_change'
+    ] LOOP
+        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
+        -- FORCE binds the table owner as well. It does not bind a superuser --
+        -- nothing does -- which is why the application connects as a
+        -- NOBYPASSRLS role instead.
+        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
+        EXECUTE format(
+            'CREATE POLICY tenant_isolation ON %I'
+            '  USING (user_id = recur_current_user_id())'
+            '  WITH CHECK (user_id = recur_current_user_id())', t);
+    END LOOP;
+END
+$rls$;
