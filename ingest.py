@@ -21,11 +21,8 @@ import sys
 from collections import Counter
 from datetime import datetime
 
-import psycopg
-
+import db
 from scrub import scrub
-
-DSN = os.environ.get("RECUR_DSN", "postgresql://recur:recur@localhost:5433/recur")
 
 _DATE_FORMATS_US = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y",
                     "%Y/%m/%d", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y")
@@ -162,7 +159,7 @@ def load(path: str, account: str, dayfirst: bool, flip_sign: bool) -> None:
             hashlib.sha256(blob.encode()).hexdigest(),
         ))
 
-    with psycopg.connect(DSN) as conn, conn.cursor() as cur:
+    with db.connect() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO account (label) VALUES (%s) "
             "ON CONFLICT (label) DO UPDATE SET label = EXCLUDED.label RETURNING id",

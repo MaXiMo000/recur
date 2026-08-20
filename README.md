@@ -75,8 +75,10 @@ schema.sql   week-1 tables (account, merchant, merchant_alias, raw_transaction)
 scrub.py     tier 0 — deterministic descriptor normalization
 ingest.py    CSV dialect sniffing, sign/date normalization, dedup, load
 test_scrub.py  assert-based checks against real descriptor shapes
-sample.csv   608 synthetic rows with known recurring series, a price step,
-             a skipped payment and same-day duplicates
+make_sample.py  regenerates sample.csv from REAL descriptor formats and real
+             2026 subscription prices; sources cited in its docstring
+sample.csv   669 rows, 26 known merchants, with a price step, a skipped
+             payment, an annual series and same-day duplicates
 ```
 
 ## Week 2: the merchant resolution ladder
@@ -88,8 +90,9 @@ tier 2  fuzzy    token_set_ratio vs known merchants          sub-ms, free
         new      nothing resembles it                        its own merchant
 ```
 
-On `sample.csv`: **644/644 transactions resolved into 17 merchants with no model
-call**, 2 items routed to review.
+On `sample.csv`: **669/669 transactions resolved into 26 merchants with no model
+call** — 26 is the ground truth exactly — with 3 items routed to review and
+**zero silent splits**.
 
 ### Tiers 3 and 4 are not built, on purpose
 
@@ -120,3 +123,57 @@ resolution is written back as an alias, so the string is never asked about again
 The general rule the ladder enforces: *only high confidence acts automatically;
 the band between confident and clearly-new belongs to a person.* The failure mode
 being defended against is not being wrong — it's being wrong quietly.
+
+## Test data: real shapes, synthetic statement
+
+No real person's transactions are used. What is real is the *descriptor formats*
+and the *prices*, both from public sources cited in `make_sample.py`:
+[Wikipedia](https://en.wikipedia.org/wiki/Billing_descriptor),
+[Stripe](https://stripe.com/resources/more/billing-descriptors),
+[Paylosophy](https://paylosophy.com/ach-credit-card-transaction-descriptors/),
+[Charge Lookup](https://www.chargelookupnow.com/articles/merchant-descriptors-explained),
+[Tom's Guide](https://www.tomsguide.com/entertainment/streaming/what-streaming-costs-in-2026-the-price-of-netflix-disney-plus-max-and-more).
+
+Descriptors invented to be parseable prove nothing. These were collected because
+they are awkward:
+
+```
+SUPER+ *1833-773-8471                        ┐ one merchant, sharing
+BT*SUPER+1-833-773-8471 SAN FRANCISCO CA     ┘ almost no characters
+
+HBOMAX.COM            ┐
+BT*HBO MAX 877-871-4204   ├─ one merchant, three spellings
+WARNERMEDIA*HBO MAX   ┘
+
+AMZN Mktp US*2K4LM9DX3    unique order id per charge
+APPLE.COM/BILL            merchant name never appears at all
+SQ*BLUE BOTTLE COFFEE*5699    trailing MCC code
+```
+
+Running these found four defects the invented data never would:
+
+1. **Order ids fragment merchants.** `2K4LM9DX3` is unique per transaction, so
+   every charge became its own merchant. Now stripped: a non-leading token
+   mixing letters and digits is an id, never a name (`1800FLOWERS` survives
+   because it's leading).
+2. **`BT*` and `PSP*` prefixes weren't known**, so Braintree and aggregator
+   traffic split off. Added to the list — and it stays a *list*, not a
+   `^[A-Z]{2,6}\*` regex, because the public spec shows the same syntax means
+   "aggregator" in `PSP*convenient store` and "merchant" in `ZXC* Site Access`.
+   Generalizing would silently destroy merchant identity.
+3. **Missing spaces defeat every token scorer at once.** `HBOMAX` vs
+   `WARNERMEDIA HBO MAX` scores 48 on `token_set_ratio` and 83 on
+   `partial_ratio` — under both thresholds, so it split with no warning.
+   Fixed with despaced containment: 1 flag across 351 merchant pairs, and it
+   was the true positive.
+4. **`ingest.py` never applied the schema** — only `resolve.py` did. Invisible
+   until the tables were dropped.
+
+### Where tier 2 actually stops
+
+`AMAZON WEB SERVICES` vs `AWS EMEA` scores 80. No string metric groups those
+without inventing false matches elsewhere — an acronym has no character overlap
+with what it abbreviates. That is a real ceiling, and it is the honest argument
+for tiers 3 and 4: an embedding or a model knows AWS *is* Amazon Web Services,
+where `token_set_ratio` never can. Until then the queue catches it, which is the
+correct failure — a question, not a wrong answer.

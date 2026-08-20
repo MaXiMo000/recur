@@ -4,7 +4,7 @@ The ladder's pure logic. The DB glue is boring; these three functions are where
 a wrong answer silently corrupts data, so this is what gets checked.
 """
 
-from resolve import classify
+from resolve import classify, contains
 
 KNOWN = ["NETFLIX", "SPOTIFY", "AMAZON WEB SERVICES", "PHILZ COFFEE", "BLUE BOTTLE"]
 
@@ -15,7 +15,7 @@ def check(label, got, expected):
     return None
 
 
-CHECKS = 7
+CHECKS = 9
 
 
 def main() -> None:
@@ -51,6 +51,15 @@ def main() -> None:
     # fills with every coffee shop and nobody ever works it.
     v, _ = classify("TRADER JOES", ["NETFLIX", "SPOTIFY", "CHEVRON"])
     f.append(check("unrelated merchant still auto-creates", v, "unknown"))
+
+    # ---- the missing-space class: defeats token_set (48) AND partial (83),
+    # so containment on the despaced strings is the only thing that catches it.
+    v, _ = classify("HBOMAX", ["WARNERMEDIA HBO MAX", "CHEVRON"])
+    f.append(check("despaced containment is queued, not silently split",
+                   v, "suspect"))
+
+    f.append(check("containment needs real length, not a 3-char coincidence",
+                   contains("AWS", ["AWS EMEA", "LAWSON"]), []))
 
     f = [x for x in f if x]
     if f:

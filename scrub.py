@@ -19,6 +19,7 @@ import re
 _PREFIX = re.compile(
     r"""^(?:
         sp|sq|tst|pp|paypal|py|dd|ec|in|wl|ig      # processor initials before a '*'
+      | bt|psp|iso                                 # Braintree, aggregators
       )\s*\*+\s*
     | ^(?:
         pos\s+(?:debit|purchase|pur)
@@ -95,7 +96,17 @@ def scrub(descriptor: str) -> str:
         if not t.isdigit() or (i == 0 and len(t) <= 2)
     ]
 
+    # Order/auth ids ('AMZN MKTP US*2K4LM9DX3') are unique per transaction, so
+    # left in place every charge becomes its own merchant. Never the first
+    # token, so names that legitimately mix digits and letters ('1800FLOWERS')
+    # survive.
+    tokens = [t for i, t in enumerate(tokens) if i == 0 or not _is_id_token(t)]
+
     return " ".join(tokens)
+
+
+def _is_id_token(t: str) -> bool:
+    return len(t) >= 5 and any(c.isdigit() for c in t) and any(c.isalpha() for c in t)
 
 
 def _strip_state(s: str) -> str:

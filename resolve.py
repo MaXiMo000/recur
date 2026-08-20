@@ -39,6 +39,11 @@ MIN_FUZZY_LEN = 4      # ratios are meaningless on 2-3 char strings
 # ever allowed to raise a question, never to answer one.
 PARTIAL_SUSPECT = 85
 
+# Missing spaces defeat every token-based scorer at once: 'HBOMAX' vs
+# 'WARNERMEDIA HBO MAX' scores 48 on token_set and 83 on partial -- under both
+# thresholds, so it splits silently. Despaced, one contains the other.
+MIN_CONTAINMENT = 5    # shorter than this and containment is coincidence
+
 
 # --------------------------------------------------------------------------- #
 # pure logic (no DB -- this is the part with tests)
@@ -78,7 +83,26 @@ def classify(needle: str, known: list[str]) -> tuple[str, list[tuple[str, float]
     if partials and partials[0][1] >= PARTIAL_SUSPECT:
         return "suspect", partials
 
+    held = contains(needle, known)
+    if held:
+        return "suspect", [(k, fuzz.partial_ratio(needle, k)) for k in held[:3]]
+
     return "unknown", hits
+
+
+def contains(needle: str, known: list[str]) -> list[str]:
+    """Known names that swallow `needle` (or are swallowed by it) once spaces
+    are removed. Deterministic, and blind to how the merchant chose to space
+    its own name."""
+    n = needle.replace(" ", "")
+    if len(n) < MIN_CONTAINMENT:
+        return []
+    out = []
+    for k in known:
+        ks = k.replace(" ", "")
+        if len(ks) >= MIN_CONTAINMENT and (n in ks or ks in n):
+            out.append(k)
+    return out
 
 
 # --------------------------------------------------------------------------- #
