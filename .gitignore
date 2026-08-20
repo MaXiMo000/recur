@@ -4,3 +4,5 @@ __pycache__/
 # never commit real statements
 *.csv
 !sample.csv
+node_modules/
+web/dist/

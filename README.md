@@ -8,14 +8,14 @@ data stays on your machine. This system has nowhere to put a bank password.
 
 ---
 
-## Status: week 3 of 5
+## Status: week 4 of 5
 
 | Week | Scope | |
 |---|---|---|
 | 1 | CSV ingest, schema, dedup, tier-0 descriptor scrub | **done** |
 | 2 | Merchant resolution: tiers 1-2 + human review queue | **done** |
 | 3 | Periodicity detection, price-change detection, forecast + benchmark | **done** |
-| 4 | React dashboard | |
+| 4 | FastAPI read-only API + React dashboard | **done** |
 | 5 | MCP server, Docker packaging, demo | |
 
 Full design: [`../recur-spec.md`](../recur-spec.md)
@@ -243,3 +243,33 @@ can only ever agree with them.
   Netflix still reported the old price and the annual total was understated
 - `next_due` could land in the past, so the forecast listed charges that had
   already happened
+
+## Week 4: API and dashboard
+
+```bash
+.venv/bin/uvicorn api:app --port 8000     # JSON API
+npm --prefix web run dev                  # dashboard on :5173
+```
+
+`api.py` is a thin projection of what the pipeline already computed — and it is
+**read-only by design**. Nothing reachable over HTTP can mutate financial data;
+ingest and resolution stay deliberate local commands. Week 5's MCP server calls
+the same functions, so REST and MCP cannot drift apart: there is only one
+implementation to drift from.
+
+### Chart decisions
+
+The annual total is a **stat tile, not a chart** — one number needs no axes.
+Subscriptions are a table with inline magnitude bars rather than a bar chart,
+because the names are as important as the amounts.
+
+Price history is a **step line**: prices hold flat and then jump, so
+interpolating between points would draw a gradual rise that never happened. One
+series, so no legend — the row heading names it. No chart library; it's ~40
+lines of inline SVG, which also keeps full control of the mark specs (2px
+stroke, ≥8px hit targets, 2px surface ring on the points).
+
+Colours come from a validated palette — one categorical slot, checked with the
+data-viz validator (lightness band, chroma floor, contrast vs surface: all pass).
+Light and dark are both defined explicitly rather than auto-flipped. Price
+changes carry an **arrow and a signed percentage**, never colour alone.

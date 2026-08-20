@@ -1,0 +1,121 @@
+/* Roles, not raw hex. Values from the validated reference palette; the only
+   categorical slot in the whole app is series-1, so there is no CVD adjacency
+   problem to solve -- every chart here has exactly one series. */
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+  --series-1: #2a78d6;
+  --series-1-wash: #cde2fb;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+  --success-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --series-1: #3987e5;
+    --series-1-wash: #184f95;
+    --success-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --series-1: #3987e5;
+  --series-1-wash: #184f95;
+  --success-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 32px 20px 64px; }
+
+header h1 { font-size: 22px; margin: 0 0 2px; letter-spacing: -0.01em; }
+header p { margin: 0 0 28px; color: var(--text-secondary); font-size: 13px; }
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+}
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.tile-label { color: var(--text-secondary); font-size: 12px; margin-bottom: 6px; }
+.tile-value { font-size: 30px; font-weight: 650; letter-spacing: -0.02em; }
+.tile-value.hero { font-size: 40px; }
+.tile-note { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+
+h2 { font-size: 14px; font-weight: 650; margin: 34px 0 10px; }
+h2 span { color: var(--text-muted); font-weight: 400; }
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th {
+  text-align: left; font-size: 11px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); white-space: nowrap;
+  padding: 0 10px 8px 0; border-bottom: 1px solid var(--grid);
+}
+td:first-child { min-width: 230px; }
+td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--grid); }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: color-mix(in srgb, var(--series-1) 7%, transparent); }
+tbody tr[aria-selected="true"] { background: color-mix(in srgb, var(--series-1) 12%, transparent); }
+.num { text-align: right; }
+.muted { color: var(--text-muted); }
+
+/* Magnitude bar: sequential single hue, 4px rounded end, anchored at zero. */
+.bar-cell { width: 34%; }
+.bar-track { background: var(--grid); height: 8px; border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--series-1); border-radius: 4px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-secondary);
+}
+
+.rows { display: flex; flex-direction: column; }
+.row {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 9px 0; border-bottom: 1px solid var(--grid);
+  font-variant-numeric: tabular-nums;
+}
+.row:last-child { border-bottom: 0; }
+.row .grow { flex: 1; }
+.date { color: var(--text-muted); font-size: 12px; min-width: 88px; }
+
+.up { color: var(--status-critical); font-weight: 600; }
+.down { color: var(--success-text); font-weight: 600; }
+
+.empty { color: var(--text-muted); padding: 14px 0; }
+.err { color: var(--status-critical); }
