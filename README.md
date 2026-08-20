@@ -8,13 +8,13 @@ data stays on your machine. This system has nowhere to put a bank password.
 
 ---
 
-## Status: week 2 of 5
+## Status: week 3 of 5
 
 | Week | Scope | |
 |---|---|---|
 | 1 | CSV ingest, schema, dedup, tier-0 descriptor scrub | **done** |
 | 2 | Merchant resolution: tiers 1-2 + human review queue | **done** |
-| 3 | Periodicity detection, price-change detection, forecast + benchmark | |
+| 3 | Periodicity detection, price-change detection, forecast + benchmark | **done** |
 | 4 | React dashboard | |
 | 5 | MCP server, Docker packaging, demo | |
 
@@ -43,7 +43,14 @@ Add `--flip-sign` if your bank records charges as positive (Amex does), and
 .venv/bin/python resolve.py --groups   # see what got grouped
 ```
 
-Tests: `.venv/bin/python test_scrub.py && .venv/bin/python test_resolve.py`
+```bash
+.venv/bin/python detect.py                # find recurring series
+.venv/bin/python detect.py --increases    # what quietly went up
+.venv/bin/python detect.py --upcoming 30  # what hits the card next
+.venv/bin/python benchmark.py             # score against known ground truth
+```
+
+Tests: `for t in test_*.py; do .venv/bin/python $t; done`
 
 ## What week 1 actually does
 
@@ -177,3 +184,62 @@ with what it abbreviates. That is a real ceiling, and it is the honest argument
 for tiers 3 and 4: an embedding or a model knows AWS *is* Amazon Web Services,
 where `token_set_ratio` never can. Until then the queue catches it, which is the
 correct failure — a question, not a wrong answer.
+
+## Week 3: periodicity detection
+
+No model is involved anywhere in this file. Four things break a naive gap check,
+and all four are in `sample.csv` on purpose:
+
+**Monthly is not 30 days.** A subscription anchored on the 31st posts on Feb 28.
+On day-gaps that reads as drift; on day-of-month it is perfectly stable. Monthly
+is scored both ways and keeps the better fit, with month-end days folded
+together so Jan 31 / Feb 28 / Mar 31 are one anchor rather than three.
+
+**A failed payment is not the end of a series.** Gaps are matched to the nearest
+whole multiple of the period, so one missing charge reads as a wide gap. But a
+cadence that only fits by assuming *most* charges were missed is rejected —
+otherwise "biweekly" swallows every monthly series, each 30-day gap being two
+skipped fortnights. That bug was live until the tests caught it.
+
+**Robust ≠ accurate.** The fit metric is the *median of the deviations*, not the
+median absolute deviation of them. MAD measures how consistent the error is
+rather than how small: five random purchases are all roughly 325 days short of a
+year, which is beautifully consistent, and scored as `annual` until this was
+fixed. Day-of-month keeps MAD, but adds a majority condition — two thirds of the
+charges have to actually sit on the anchor, because three dates clustering out
+of five drags the median deviation to nothing while two sit weeks away.
+
+**Not every recurring charge has a price.** AWS varies every month. Coefficient
+of variation separates fixed subscriptions from usage-based ones, and
+price-change detection is only run on the fixed ones.
+
+### Price changes must persist
+
+A step is only reported if the *following* charge agrees with it. That one
+condition is what keeps prorated charges, promo months and partial refunds out
+of the results — and it means the most recent charge can never trigger one on
+its own. On the sample it finds Netflix's real end-of-March-2026 increase:
+`24.99 -> 26.99, +8.0%, +24.00/yr`.
+
+### Benchmark
+
+```
+26 merchants, 10 truly recurring
+precision 1.000   recall 1.000   F1 1.000   cadence 10/10
+```
+
+**This is synthetic data, so treat it as a regression guard, not as evidence of
+real-world accuracy.** Its value is that tuning a threshold badly now fails
+loudly instead of silently. `benchmark.py` states ground truth independently of
+`make_sample.py` on purpose — a scorer that imports the generator's definitions
+can only ever agree with them.
+
+### Bugs this phase found
+
+- `biweekly` matched every monthly series (skip-divisor let short cadences
+  absorb long gaps)
+- `annual` matched random one-off purchases (MAD measured consistency, not size)
+- "current amount" was the median of the whole series, so after a price rise
+  Netflix still reported the old price and the annual total was understated
+- `next_due` could land in the past, so the forecast listed charges that had
+  already happened

@@ -94,8 +94,8 @@ monthly(lambda i: random.choice([
 monthly("ZXC* Site Access 800-123-4567", 12.00, (2025, 9), 12, 28)
 
 # Annual, 14 months apart -> only two points, must not be called monthly
-add(date(2025, 10, 14), "NAMECHEAP.COM*ORDER 000198234", 38.88)
-add(date(2026, 8, 14), "NAMECHEAP.COM*ORDER 000221907", 44.88)
+add(date(2025, 9, 14), "NAMECHEAP.COM*ORDER 000198234", 38.88)
+add(date(2026, 9, 13), "NAMECHEAP.COM*ORDER 000221907", 44.88)
 
 # Usage-based recurring: high amount variance, still a real series
 monthly(lambda i: random.choice([

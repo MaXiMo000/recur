@@ -65,3 +65,33 @@ CREATE TABLE IF NOT EXISTS resolution_queue (
 
 CREATE INDEX IF NOT EXISTS idx_queue_pending
     ON resolution_queue (status) WHERE status = 'pending';
+
+-- ---------------------------------------------------------------- week 3 --
+
+CREATE TABLE IF NOT EXISTS subscription (
+    id                 SERIAL PRIMARY KEY,
+    merchant_id        INTEGER NOT NULL REFERENCES merchant(id) ON DELETE CASCADE,
+    account_id         INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE,
+    cadence            TEXT NOT NULL,
+    period_days        NUMERIC(7,2) NOT NULL,
+    anchor_day         SMALLINT,
+    current_amount_cents BIGINT NOT NULL,
+    amount_cv          NUMERIC(5,3) NOT NULL,
+    charge_count       INTEGER NOT NULL,
+    first_seen         DATE NOT NULL,
+    last_seen          DATE NOT NULL,
+    next_due           DATE,
+    status             TEXT NOT NULL CHECK (status IN ('active','lapsed','cancelled')),
+    confidence         NUMERIC(4,3) NOT NULL,
+    UNIQUE (merchant_id, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS price_change (
+    id               SERIAL PRIMARY KEY,
+    subscription_id  INTEGER NOT NULL REFERENCES subscription(id) ON DELETE CASCADE,
+    effective_date   DATE NOT NULL,
+    old_amount_cents BIGINT NOT NULL,
+    new_amount_cents BIGINT NOT NULL,
+    pct_change       NUMERIC(6,2) NOT NULL,
+    UNIQUE (subscription_id, effective_date)
+);
