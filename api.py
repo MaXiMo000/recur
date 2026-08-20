@@ -27,6 +27,8 @@ import auth
 import config
 import db
 import mailer
+import mcp_http
+import oauth
 import pipeline
 from detect import CADENCES, USAGE_CV
 
@@ -40,6 +42,7 @@ async def lifespan(app: FastAPI):
     db.apply_schema()
     db.open_pool()
     auth.purge_expired()
+    oauth.purge_expired()
     yield
     db.close_pool()
 
@@ -412,6 +415,11 @@ def health() -> dict:
     with db.admin() as conn:
         conn.execute("SELECT 1")
     return {"status": "ok"}
+
+
+# The OAuth and MCP routes are included before the SPA catch-all below, which
+# would otherwise swallow /.well-known/* and /oauth/* and answer them with HTML.
+app.include_router(mcp_http.router)
 
 
 # --------------------------------------------------------------- frontend --

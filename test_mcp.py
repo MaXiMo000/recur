@@ -1,24 +1,26 @@
 """Run: python test_mcp.py
 
-Exercises every MCP tool against the live database, and asserts the two design
-rules that a reader can't verify by eye:
-
-  - no tool description carries content out of the database (the prompt
-    injection boundary -- a merchant name is attacker-controlled text, a tool
-    description is read by the model as instructions)
-  - the numbers the MCP server reports match what the REST API reports, since
-    the whole claim is that they share one implementation
+The MCP tools, and the one property a reader cannot verify by eye: that no tool
+description carries content out of the database. A merchant descriptor is
+attacker-controlled text; a tool description is read by the model as
+instructions.
 """
 
-import asyncio
-import json
+import auth
+import db
+import mcp_tools
+import pipeline
 
-import api
-from mcp_server import mcp
-
-EXPECTED = {"list_subscriptions", "spending_summary", "upcoming_charges",
-            "price_increases", "find_forgotten", "data_quality"}
 FAILURES = []
+
+CSV = b"""Date,Description,Amount
+09/03/2025,SP * NETFLIX.COM 866-579,-15.49
+10/03/2025,NETFLIX.COM,-15.49
+11/03/2025,NETFLIX.COM,-15.49
+12/03/2025,NETFLIX.COM,-17.99
+01/03/2026,NETFLIX.COM,-17.99
+02/03/2026,NETFLIX.COM,-17.99
+"""
 
 
 def check(label, got, expected):
@@ -26,64 +28,75 @@ def check(label, got, expected):
         FAILURES.append(f"  {label}\n    expected {expected!r}\n    got      {got!r}")
 
 
-async def call(name, args=None):
-    """A tool returning a list comes back as one content block PER ITEM, not as
-    a single block holding a list. Reading only block 0 silently gives you the
-    first row and calls it the answer."""
-    res = await mcp.call_tool(name, args or {})
-    return [json.loads(b.text) for b in res.content]
+def main() -> None:
+    db.apply_schema()
+    db.open_pool()
+    try:
+        with db.admin() as conn:
+            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.com",))
+            conn.commit()
+        uid, tok = auth.register("tools@example.com", "a-perfectly-fine-password")
+        auth.consume_email_token(tok, "verify")
+        pipeline.run(uid, CSV, "card")
 
+        schema = mcp_tools.schema()
+        check("every tool is described", len(schema), len(mcp_tools.TOOLS))
+        check("each has an input schema",
+              all("inputSchema" in t for t in schema), True)
 
-async def call_one(name, args=None):
-    rows = await call(name, args)
-    return rows[0] if rows else {}
+        # The injection boundary: no DB content may reach a description.
+        merchants = {r["merchant"] for r in mcp_tools.list_subscriptions(uid, "all")}
+        check("merchants exist to leak", len(merchants) > 0, True)
+        leaked = [t["name"] for t in schema
+                  if any(m in t["description"] for m in merchants)]
+        check("no database content in any tool description", leaked, [])
 
+        s = mcp_tools.spending_summary(uid)
+        check("summary reports the active subscription", s["active_subscriptions"], 1)
+        check("summary reports the price rise",
+              s["annual_cost_added_by_price_rises"] > 0, True)
 
-async def main():
-    tools = await mcp.list_tools()
-    check("every tool is registered", {t.name for t in tools}, EXPECTED)
+        subs = mcp_tools.list_subscriptions(uid)
+        check("netflix is listed at its current price", subs[0]["amount"], 17.99)
+        check("filtering by annual cost works",
+              mcp_tools.list_subscriptions(uid, min_annual_dollars=99999), [])
 
-    # Descriptions must be static. If a merchant name ever reaches one, a CSV
-    # can write instructions the model will read.
-    merchants = {r["merchant"] for r in api.subscriptions()}
-    leaked = [t.name for t in tools
-              if any(m in (t.description or "") for m in merchants)]
-    check("no DB content in any tool description", leaked, [])
+        up = mcp_tools.upcoming_charges(uid, 400)
+        check("days is clamped to a year", up["days"], 365)
+        check("upcoming total matches its rows",
+              up["total"], round(sum(c["amount"] for c in up["charges"]), 2))
 
-    s = await call_one("spending_summary")
-    check("summary matches the REST API",
-          s["annual"], round(api.summary()["annual_cents"] / 100, 2))
-    check("summary counts active subs", s["active_subscriptions"],
-          len([r for r in api.subscriptions() if r["status"] == "active"]))
+        inc = mcp_tools.price_increases(uid)
+        check("the increase is reported", (inc[0]["old_amount"], inc[0]["new_amount"]),
+              (15.49, 17.99))
 
-    subs = await call("list_subscriptions", {"status": "all"})
-    check("list matches the REST API", len(subs), len(api.subscriptions()))
+        q = mcp_tools.data_quality(uid)
+        check("data quality counts every transaction", q["transactions"], 6)
 
-    big = await call("list_subscriptions", {"min_annual_dollars": 200})
-    check("min_annual_dollars filters", all(r["annual"] >= 200 for r in big), True)
+        # An unknown tool is refused rather than silently doing nothing.
+        try:
+            mcp_tools.call(uid, "definitely_not_a_tool", {})
+            FAILURES.append("  unknown tool: expected KeyError")
+        except KeyError:
+            pass
 
-    up = await call_one("upcoming_charges", {"days": 14})
-    check("upcoming total is the sum of its charges",
-          up["total"], round(sum(c["amount"] for c in up["charges"]), 2))
+        # Unexpected arguments are dropped, not forwarded into the function.
+        r = mcp_tools.call(uid, "spending_summary", {"user_id": 99999, "evil": True})
+        check("stray arguments cannot re-point a tool at another user",
+              r["active_subscriptions"], 1)
 
-    # days is clamped, not trusted
-    wild = await call_one("upcoming_charges", {"days": 99999})
-    check("out-of-range days doesn't error", isinstance(wild["charges"], list), True)
-
-    inc = await call("price_increases")
-    check("increases match the REST API", len(inc), len(api.increases()))
-
-    await call("find_forgotten")
-    q = await call_one("data_quality")
-    check("data_quality reports every transaction",
-          q["resolved_to_a_merchant"] <= q["transactions"], True)
+        with db.admin() as conn:
+            conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.com",))
+            conn.commit()
+    finally:
+        db.close_pool()
 
     if FAILURES:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print(f"ok  (10 checks, {len(tools)} tools)")
+    print("ok  (13 mcp tool checks)")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
