@@ -36,14 +36,14 @@ app.add_middleware(
 
 
 def _rows(sql: str, params: tuple = ()) -> list[dict]:
-    with db.connect() as conn, conn.cursor() as cur:
+    with db.connect(readonly=True) as conn, conn.cursor() as cur:
         cur.execute(sql, params)
         cols = [d.name for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 def _as_of() -> date:
-    with db.connect() as conn, conn.cursor() as cur:
+    with db.connect(readonly=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT max(posted_date) FROM raw_transaction")
         return cur.fetchone()[0] or date.today()
 

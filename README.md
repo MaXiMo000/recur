@@ -344,3 +344,80 @@ $2,097.31/year  ·  Netflix +8.0% found  ·  0 silent merchant splits
 
 Benchmark numbers are against generated data, so they are a regression guard,
 not a claim about field accuracy. The real test is your own statement.
+
+## Security
+
+The threat this design removes rather than mitigates: **there is no credential
+to steal.** No Plaid, no bank login, no OAuth token, no API key. Nothing in the
+repo needs a `.env`, because there is no secret to put in one. The only setting
+is `RECUR_DSN`, and it has a working default.
+
+| | |
+|---|---|
+| Postgres | bound to `127.0.0.1` only |
+| API / MCP connections | `SET default_transaction_read_only = on` |
+| SQL | fully parameterized, no string-built queries |
+| MCP transport | stdio — no port, no token, no network surface |
+| MCP tool descriptions | static literals, never DB content |
+| Outbound network calls | none — no HTTP client or model SDK is imported |
+
+### Two things found by testing rather than reading
+
+**The database was on the LAN.** `ports: "5433:5432"` in Compose binds `0.0.0.0`,
+not localhost. Connecting from this machine's own LAN address read all 669
+transactions using the password that is printed in `docker-compose.yml`. On any
+shared network — a café, an office, an apartment building — that is every
+transaction you own, readable by strangers. Now `127.0.0.1:5433:5432`, verified
+by a connection attempt from the LAN address being refused.
+
+**"Read-only" was only a docstring.** `api.py` and `mcp_server.py` are now
+opened with `default_transaction_read_only`, so Postgres itself rejects
+`DELETE`, `UPDATE` and `DROP` on those connections. A property the database
+guarantees, not one a reviewer has to take on trust.
+
+### What is still true
+
+Anyone with your macOS login can read the database; it is unencrypted at rest
+beyond FileVault. The Postgres password is in `docker-compose.yml`, which is
+acceptable *only* while the binding stays on loopback. If you ever expose the
+port, that password becomes the entire defence — change it first.
+
+### It does not use any AI credit
+
+No model is called anywhere in the pipeline. The resolution ladder is regex and
+RapidFuzz; periodicity detection is arithmetic. The MCP server ships **zero**
+model calls — it only answers questions about your database. Asking Claude
+"what am I paying for?" spends your Claude usage on *that conversation*, exactly
+as any other message would; the server itself adds nothing.
+
+## Which banks does this work with?
+
+Not all of them, and the honest list matters more than the claim.
+
+**Handled:** US, UK, EU, Indian and Australian CSV exports; `,`/`;`/tab
+delimiters; separate debit/credit columns; positive-means-charge files (Amex);
+`1,234.56` and `1.234,56` and `1 234,56`; `DD/MM` via `--dayfirst`; dotted
+German dates; non-Latin merchant names (Japanese, Cyrillic, Devanagari, CJK,
+Arabic).
+
+**Two bugs found by testing non-US formats:**
+
+1. `1.234,56` parsed as **$1.23** — off by a factor of a thousand, silently. The
+   decimal separator is now detected (last separator wins, and only when 1–2
+   digits follow it, since three digits after a separator is a thousands group).
+2. `メルカリ`, `Аптека`, `नेटफ्लिक्स`, `支付宝` all scrubbed to the **empty
+   string** — every non-Latin merchant name was deleted and its charges belonged
+   to nobody. Word characters are now tested by Unicode category. Combining
+   marks count: `str.isalnum()` is `False` for a Devanagari vowel sign, so an
+   alnum test shreds `नेटफ्लिक्स` into five meaningless fragments.
+
+**Still US-centric, and not fixed:**
+
+- One currency per database, defaulting to USD. Multi-currency accounts and FX
+  conversion are not handled at all.
+- `08/03/2026` is read as March 8 unless you pass `--dayfirst`. There is no
+  auto-detection, and guessing wrong is silent.
+- The processor-prefix list (`SQ*`, `TST*`, `BT*`, `PSP*`) is US/EU. Indian
+  `UPI/`, `IMPS/`, `NEFT/` and German `SEPA-ELV LASTSCHRIFT` prefixes are left
+  in place — harmless, since fuzzy matching ignores extra tokens, but untuned.
+- The trailing-state-code rule only knows US states.

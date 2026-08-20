@@ -16,9 +16,17 @@ DSN = os.environ.get("RECUR_DSN", "postgresql://recur:recur@localhost:5433/recur
 _SCHEMA = pathlib.Path(__file__).with_name("schema.sql")
 
 
-def connect() -> psycopg.Connection:
+def connect(readonly: bool = False) -> psycopg.Connection:
+    """readonly=True is enforced by the server, not by convention: Postgres
+    rejects every INSERT, UPDATE and DDL on the connection. api.py and
+    mcp_server.py use it, so 'this interface cannot write' is a property the
+    database guarantees rather than a claim a reviewer has to take on trust.
+    """
     conn = psycopg.connect(DSN)
     with conn.cursor() as cur:
-        cur.execute(_SCHEMA.read_text())
+        if readonly:
+            cur.execute("SET default_transaction_read_only = on")
+        else:
+            cur.execute(_SCHEMA.read_text())
     conn.commit()
     return conn

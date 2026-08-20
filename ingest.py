@@ -25,9 +25,10 @@ import db
 from scrub import scrub
 
 _DATE_FORMATS_US = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y",
-                    "%Y/%m/%d", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y")
+                    "%Y/%m/%d", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y",
+                    "%d.%m.%Y")
 _DATE_FORMATS_INTL = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y",
-                      "%Y/%m/%d", "%d-%b-%Y", "%d %b %Y")
+                      "%d.%m.%Y", "%d.%m.%y", "%Y/%m/%d", "%d-%b-%Y", "%d %b %Y")
 
 
 # --------------------------------------------------------------------------- #
@@ -45,12 +46,39 @@ def pick_column(headers: list[str], *keywords: str, exclude: tuple = ()) -> str 
 
 
 def parse_amount(raw: str) -> int | None:
-    """'$1,234.56' / '(45.00)' -> integer cents. Parens mean negative."""
+    """'$1,234.56', '1.234,56', '1 234,56', '(45.00)' -> integer cents.
+
+    Half the world writes 1.234,56 for what the US writes as 1,234.56. Stripping
+    every non-digit except '.' turns the European form into 1.23456 -- off by a
+    factor of a thousand, with no error and no warning. So the decimal separator
+    is *detected*: whichever of '.' or ',' appears last, and only when 1-2 digits
+    follow it (three digits after a separator is a thousands group, not a price).
+    """
     s = (raw or "").strip()
     if not s:
         return None
-    negative = s.startswith("(") and s.endswith(")")
-    s = re.sub(r"[^\d.\-]", "", s)
+    negative = (s.startswith("(") and s.endswith(")")) or "-" in s
+    s = re.sub(r"[^\d.,\s]", "", s).strip()
+    if not s:
+        return None
+
+    dot, comma = s.rfind("."), s.rfind(",")
+    if dot > -1 and comma > -1:
+        dec = "." if dot > comma else ","
+    elif comma > -1:
+        dec = "," if len(s) - comma - 1 in (1, 2) else None
+    elif dot > -1:
+        dec = "." if len(s) - dot - 1 in (1, 2) else None
+    else:
+        dec = None
+
+    if dec == ",":
+        s = s.replace(".", "").replace(" ", "").replace(",", ".")
+    else:
+        s = s.replace(",", "").replace(" ", "")
+        if dec is None:
+            s = s.replace(".", "")       # '1.234' is thousands, not 1.234
+
     if not s or s in {"-", "."}:
         return None
     try:
@@ -171,9 +199,9 @@ def load(path: str, account: str, dayfirst: bool, flip_sign: bool) -> None:
             "INSERT INTO raw_transaction "
             "(account_id, posted_date, amount_cents, raw_descriptor, scrubbed,"
             " source_file, dedup_hash) "
-            f"VALUES ({account_id}, %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (dedup_hash) DO NOTHING",
-            records,
+            [(account_id, *r) for r in records],
         )
         inserted = cur.rowcount
         conn.commit()

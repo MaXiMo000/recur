@@ -7,7 +7,11 @@ services:
       POSTGRES_PASSWORD: recur
       POSTGRES_DB: recur
     ports:
-      - "5433:5432"   # 5433 so it can't collide with a local postgres
+      # 127.0.0.1 is load-bearing, not decoration. Plain "5433:5432" binds
+      # 0.0.0.0, which puts a database full of your bank transactions on every
+      # network you join, behind a password that is in this file. 5433 so it
+      # can't collide with a local postgres.
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro

@@ -29,11 +29,35 @@ CASES = [
     ("CA", "CA"),
     # idempotent: scrubbing a scrubbed string changes nothing
     ("AT&T *PAYMENT 800-288-2020 TX", "AT T PAYMENT"),
+    # Non-Latin merchant names must survive. An [A-Z0-9] filter deletes these
+    # outright; an isalnum() filter shreds Devanagari, because a vowel sign is
+    # a combining mark and isalnum() is False for it.
+    ("\u30e1\u30eb\u30ab\u30ea", "\u30e1\u30eb\u30ab\u30ea"),
+    ("\u0410\u043f\u0442\u0435\u043a\u0430 \u0420\u0438\u0433\u043b\u0430",
+     "\u0410\u041f\u0422\u0415\u041a\u0410 \u0420\u0418\u0413\u041b\u0410"),
+    ("\u0928\u0947\u091f\u092b\u094d\u0932\u093f\u0915\u094d\u0938",
+     "\u0928\u0947\u091f\u092b\u094d\u0932\u093f\u0915\u094d\u0938"),
+    ("\u652f\u4ed8\u5b9d-\u7f51\u6613\u4e91\u97f3\u4e50",
+     "\u652f\u4ed8\u5b9d \u7f51\u6613\u4e91\u97f3\u4e50"),
+]
+
+# Half the world writes 1.234,56 for what the US writes as 1,234.56. Getting
+# this wrong is silent and off by a factor of a thousand.
+AMOUNTS = [
+    ("$1,234.56", 123456), ("1.234,56", 123456), ("1 234,56", 123456),
+    ("\u00a345.99", 4599), ("\u20b91,299.00", 129900), ("(45.00)", -4500),
+    ("-1.234,56", -123456), ("1,50", 150), ("1,500", 150000), ("45.99", 4599),
+    ("", None), ("--", None),
 ]
 
 
 def main() -> None:
+    from ingest import parse_amount
     failures = []
+    for raw, want in AMOUNTS:
+        got = parse_amount(raw)
+        if got != want:
+            failures.append(f"  amount {raw!r}\n    expected {want!r}\n    got      {got!r}")
     for raw, expected in CASES:
         got = scrub(raw)
         if got != expected:
@@ -42,10 +66,10 @@ def main() -> None:
             failures.append(f"  not idempotent: {raw!r} -> {got!r} -> {scrub(got)!r}")
 
     if failures:
-        print(f"FAIL ({len(failures)}/{len(CASES)})")
+        print(f"FAIL ({len(failures)})")
         print("\n".join(failures))
         raise SystemExit(1)
-    print(f"ok  ({len(CASES)} cases)")
+    print(f"ok  ({len(CASES)} descriptors, {len(AMOUNTS)} amounts)")
 
 
 if __name__ == "__main__":

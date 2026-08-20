@@ -140,7 +140,7 @@ def data_quality() -> dict:
     queue are not yet counted against any merchant.
     """
     import db
-    with db.connect() as conn, conn.cursor() as cur:
+    with db.connect(readonly=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FILTER (WHERE merchant_id IS NOT NULL), count(*) "
                     "FROM raw_transaction")
         done, total = cur.fetchone()

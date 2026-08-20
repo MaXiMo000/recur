@@ -13,6 +13,7 @@ call or a guess -- if it can't be done with a rule, it belongs in a later tier.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 # Card-network and payment-processor junk that prefixes the real merchant name.
 # Applied repeatedly, because they stack: "POS DEBIT SQ *BLUE BOTTLE".
@@ -83,8 +84,15 @@ def scrub(descriptor: str) -> str:
         if s == before:
             break
 
-    # Anything left that isn't a letter, digit or space is a separator.
-    s = re.sub(r"[^A-Z0-9 ]+", " ", s)
+    # Anything that isn't part of a word is a separator. Tested by Unicode
+    # category rather than against [A-Z0-9], because that class deletes every
+    # non-Latin script outright -- a Japanese, Cyrillic, Devanagari or CJK
+    # merchant name scrubs to the empty string and the charge belongs to no one.
+    #
+    # Marks (category M) matter as much as letters: str.isalnum() is False for
+    # a Devanagari vowel sign, so an alnum test shreds नेटफ्लिक्स into five
+    # meaningless fragments. ZWNJ/ZWJ are joiners inside Indic and Arabic words.
+    s = "".join(ch if _is_word_char(ch) else " " for ch in s)
     tokens = s.split()
 
     # Store numbers hide mid-string ("BLUE BOTTLE 0091 OAKLAND"). Any pure-numeric
@@ -103,6 +111,14 @@ def scrub(descriptor: str) -> str:
     tokens = [t for i, t in enumerate(tokens) if i == 0 or not _is_id_token(t)]
 
     return " ".join(tokens)
+
+
+_JOINERS = {"\u200c", "\u200d"}
+
+
+def _is_word_char(ch: str) -> bool:
+    return (ch == " " or ch in _JOINERS
+            or unicodedata.category(ch)[0] in ("L", "N", "M"))
 
 
 def _is_id_token(t: str) -> bool:
