@@ -1,41 +1,25 @@
 import { Fragment, useEffect, useState } from "react";
 
-const API = "http://127.0.0.1:8000/api";
+import { api, ApiError } from "./api";
+import { AuthScreen, TokenScreen } from "./Auth";
+import { AccountPanel, ReviewQueue, Upload } from "./Upload";
 
-/* The deployed demo has no backend. Rather than a build flag and two code
-   paths, every request tries the local API first and falls back to a frozen
-   snapshot of synthetic data -- so what's on the CDN is exercised by the same
-   code that runs against a live database. */
-let snapshot = null;
-const loadSnapshot = async () => {
-  if (!snapshot) snapshot = fetch(`${import.meta.env.BASE_URL}demo.json`).then((r) => r.json());
-  return snapshot;
-};
-
-const fromSnapshot = async (path) => {
-  const d = await loadSnapshot();
-  if (path === "summary") return d.summary;
-  if (path.startsWith("subscriptions")) return d.subscriptions;
-  if (path.startsWith("upcoming")) return d.upcoming;
-  if (path.startsWith("increases")) return d.increases;
-  if (path.startsWith("history/")) return d.history[path.split("/")[1]] ?? [];
-  throw new Error(`no snapshot for ${path}`);
-};
 const money = (c) => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
-const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US",
+                                                               { month: "short", day: "numeric" });
 
-function useApi(path) {
+/* Every fetch is a real request against the signed-in account. There is no
+   fallback to sample data: showing a real user invented numbers when a request
+   fails would be worse than showing them an error. */
+function useApi(fn, deps = [], reloadKey = 0) {
   const [state, set] = useState({ loading: true });
   useEffect(() => {
     let live = true;
-    fetch(`${API}/${path}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => live && set({ data, demo: false }))
-      .catch(() => fromSnapshot(path)
-        .then((data) => live && set({ data, demo: true }))
-        .catch((error) => live && set({ error })));
+    fn()
+      .then((data) => live && set({ data }))
+      .catch((error) => live && set({ error }));
     return () => { live = false; };
-  }, [path]);
+  }, [...deps, reloadKey]);
   return state;
 }
 
@@ -105,7 +89,8 @@ function PriceHistory({ points, title }) {
 
 function Subscriptions({ rows }) {
   const [openId, setOpenId] = useState(null);
-  const history = useApi(openId ? `history/${openId}` : "summary");
+  const history = useApi(() => (openId ? api.history(openId) : Promise.resolve(null)),
+                         [openId]);
   const max = Math.max(...rows.map((r) => r.annual_cents), 1);
 
   return (
@@ -152,108 +137,142 @@ function Subscriptions({ rows }) {
   );
 }
 
-export default function App() {
-  const summary = useApi("summary");
-  const subs = useApi("subscriptions");
-  const upcoming = useApi("upcoming?days=30");
-  const increases = useApi("increases");
+function tokenFromUrl() {
+  const path = window.location.pathname;
+  const token = new URLSearchParams(window.location.search).get("token");
+  if (!token) return null;
+  if (path.startsWith("/verify")) return { kind: "verify", token };
+  if (path.startsWith("/reset")) return { kind: "reset", token };
+  return null;
+}
 
-  if (summary.error) {
-    return (
-      <div className="wrap">
-        <h1>Recur</h1>
-        <p className="err">Can't reach the API. Start it with:</p>
-        <pre className="card">.venv/bin/uvicorn api:app --port 8000</pre>
-      </div>
-    );
-  }
-  if (!summary.data) return <div className="wrap muted">loading…</div>;
+function Dashboard({ me, onSignedOut }) {
+  const [reload, setReload] = useState(0);
+  const bump = () => setReload((n) => n + 1);
+
+  const summary = useApi(() => api.summary(), [], reload);
+  const subs = useApi(() => api.subscriptions(), [], reload);
+  const upcoming = useApi(() => api.upcoming(30), [], reload);
+  const increases = useApi(() => api.increases(), [], reload);
+  const queue = useApi(() => api.reviewQueue(), [], reload);
+
   const s = summary.data;
+  const hasData = s && (subs.data?.length || queue.data?.length);
 
   return (
     <div className="wrap">
       <header>
         <h1>Recur</h1>
         <p>
-          What you're actually paying for · statement through {s.as_of}
-          {summary.demo && (
-            <span className="pill" style={{ marginLeft: 10 }}>
-              demo · synthetic data
-            </span>
-          )}
+          What you&rsquo;re actually paying for
+          {s?.as_of && <> · statement through {s.as_of}</>}
         </p>
       </header>
 
-      <div className="tiles">
-        <div className="card">
-          <div className="tile-label">Recurring spend</div>
-          <div className="tile-value hero">{money(s.annual_cents)}</div>
-          <div className="tile-note">per year · {money(s.monthly_cents)}/mo</div>
-        </div>
-        <div className="card">
-          <div className="tile-label">Active subscriptions</div>
-          <div className="tile-value">{s.active_count}</div>
-          <div className="tile-note">
-            {s.inactive_count ? `${s.inactive_count} lapsed or cancelled` : "none lapsed"}
-          </div>
-        </div>
-        <div className="card">
-          <div className="tile-label">Price rises</div>
-          <div className="tile-value" style={{ color: s.price_increase_annual_cents > 0 ? "var(--status-critical)" : undefined }}>
-            {s.price_increase_annual_cents > 0 ? "+" : ""}{money(s.price_increase_annual_cents)}
-          </div>
-          <div className="tile-note">added per year</div>
-        </div>
+      <AccountPanel me={me} onSignedOut={onSignedOut} />
+
+      <div style={{ marginTop: 16 }}>
+        <Upload onLoaded={bump} />
       </div>
 
-      <h2>Subscriptions <span>· click a row for its price history</span></h2>
-      <div className="card">
-        {subs.data?.length ? <Subscriptions rows={subs.data} />
-                           : <div className="empty">No recurring charges found.</div>}
-      </div>
+      {!hasData && !summary.loading && (
+        <p className="muted" style={{ marginTop: 24 }}>
+          Nothing loaded yet. Upload a statement above to see what you&rsquo;re paying for.
+        </p>
+      )}
 
-      <h2>Next 30 days</h2>
-      <div className="card">
-        <div className="rows">
-          {upcoming.data?.length ? (
-            <>
-              {upcoming.data.map((r, i) => (
-                <div className="row" key={i}>
-                  <span className="date">{day(r.next_due)}</span>
-                  <span className="grow">{r.merchant}</span>
-                  <span>{money(r.current_amount_cents)}</span>
-                </div>
-              ))}
-              <div className="row" style={{ fontWeight: 650 }}>
-                <span className="date"></span>
-                <span className="grow">Total</span>
-                <span>{money(upcoming.data.reduce((a, r) => a + r.current_amount_cents, 0))}</span>
+      {s && subs.data?.length > 0 && (
+        <>
+          <div className="tiles" style={{ marginTop: 28 }}>
+            <div className="card">
+              <div className="tile-label">Recurring spend</div>
+              <div className="tile-value hero">{money(s.annual_cents)}</div>
+              <div className="tile-note">per year · {money(s.monthly_cents)}/mo</div>
+            </div>
+            <div className="card">
+              <div className="tile-label">Active subscriptions</div>
+              <div className="tile-value">{s.active_count}</div>
+              <div className="tile-note">
+                {s.inactive_count ? `${s.inactive_count} lapsed or cancelled` : "none lapsed"}
               </div>
-            </>
-          ) : <div className="empty">Nothing due in the next 30 days.</div>}
-        </div>
-      </div>
-
-      <h2>Price changes</h2>
-      <div className="card">
-        <div className="rows">
-          {increases.data?.length ? increases.data.map((r, i) => {
-            const up = r.new_amount_cents > r.old_amount_cents;
-            return (
-              <div className="row" key={i}>
-                <span className="date">{day(r.effective_date)}</span>
-                <span className="grow">{r.merchant}</span>
-                <span className="muted">{money(r.old_amount_cents)} → {money(r.new_amount_cents)}</span>
-                {/* Arrow + signed number, never colour alone. */}
-                <span className={up ? "up" : "down"} style={{ minWidth: 118, textAlign: "right" }}>
-                  {up ? "▲" : "▼"} {up ? "+" : ""}{Number(r.pct_change).toFixed(1)}% ·{" "}
-                  {money(r.annual_impact_cents)}/yr
-                </span>
+            </div>
+            <div className="card">
+              <div className="tile-label">Price rises</div>
+              <div className="tile-value" style={{
+                color: s.price_increase_annual_cents > 0 ? "var(--status-critical)" : undefined }}>
+                {s.price_increase_annual_cents > 0 ? "+" : ""}{money(s.price_increase_annual_cents)}
               </div>
-            );
-          }) : <div className="empty">No price changes detected.</div>}
-        </div>
-      </div>
+              <div className="tile-note">added per year</div>
+            </div>
+          </div>
+
+          <h2>Subscriptions <span>· click a row for its price history</span></h2>
+          <div className="card"><Subscriptions rows={subs.data} /></div>
+
+          <h2>Next 30 days</h2>
+          <div className="card">
+            <div className="rows">
+              {upcoming.data?.length ? (
+                <>
+                  {upcoming.data.map((r, i) => (
+                    <div className="row" key={i}>
+                      <span className="date">{day(r.next_due)}</span>
+                      <span className="grow">{r.merchant}</span>
+                      <span>{money(r.current_amount_cents)}</span>
+                    </div>
+                  ))}
+                  <div className="row" style={{ fontWeight: 650 }}>
+                    <span className="date"></span>
+                    <span className="grow">Total</span>
+                    <span>{money(upcoming.data.reduce((a, r) => a + r.current_amount_cents, 0))}</span>
+                  </div>
+                </>
+              ) : <div className="empty">Nothing due in the next 30 days.</div>}
+            </div>
+          </div>
+
+          <h2>Price changes</h2>
+          <div className="card">
+            <div className="rows">
+              {increases.data?.length ? increases.data.map((r, i) => {
+                const up = r.new_amount_cents > r.old_amount_cents;
+                return (
+                  <div className="row" key={i}>
+                    <span className="date">{day(r.effective_date)}</span>
+                    <span className="grow">{r.merchant}</span>
+                    <span className="muted">
+                      {money(r.old_amount_cents)} → {money(r.new_amount_cents)}
+                    </span>
+                    <span className={up ? "up" : "down"}
+                          style={{ minWidth: 118, textAlign: "right" }}>
+                      {up ? "▲" : "▼"} {up ? "+" : ""}{Number(r.pct_change).toFixed(1)}% ·{" "}
+                      {money(r.annual_impact_cents)}/yr
+                    </span>
+                  </div>
+                );
+              }) : <div className="empty">No price changes detected.</div>}
+            </div>
+          </div>
+        </>
+      )}
+
+      <ReviewQueue items={queue.data} onResolved={bump} />
     </div>
   );
+}
+
+export default function App() {
+  const [me, setMe] = useState(undefined);   // undefined = still checking
+  const [link] = useState(tokenFromUrl);
+
+  const load = () => api.me().then(setMe).catch(() => setMe(null));
+  useEffect(() => { load(); }, []);
+
+  if (link) {
+    return <TokenScreen kind={link.kind} token={link.token}
+                        onDone={() => { window.location.href = "/"; }} />;
+  }
+  if (me === undefined) return <div className="wrap muted">loading…</div>;
+  if (me === null) return <AuthScreen onSignedIn={load} />;
+  return <Dashboard me={me} onSignedOut={() => setMe(null)} />;
 }

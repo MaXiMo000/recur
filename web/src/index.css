@@ -119,3 +119,96 @@ tbody tr[aria-selected="true"] { background: color-mix(in srgb, var(--series-1) 
 
 .empty { color: var(--text-muted); padding: 14px 0; }
 .err { color: var(--status-critical); }
+
+/* ------------------------------------------------------------ auth & forms */
+
+.auth {
+  max-width: 400px;
+  margin: 8vh auto;
+}
+.auth h1 { font-size: 24px; margin: 0 0 6px; letter-spacing: -0.01em; }
+.auth p { font-size: 13px; margin-top: 0; }
+
+.field { display: block; margin-bottom: 14px; }
+.field > span {
+  display: block; font-size: 12px; font-weight: 500;
+  color: var(--text-secondary); margin-bottom: 5px;
+}
+.field input {
+  width: 100%; padding: 9px 11px; font: inherit; font-size: 14px;
+  color: var(--text-primary); background: var(--page);
+  border: 1px solid var(--border); border-radius: 7px;
+}
+.field input:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 1px;
+}
+.field small { display: block; margin-top: 4px; font-size: 11px; }
+
+.check { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 4px 0 14px; }
+.check input { accent-color: var(--series-1); }
+
+button {
+  font: inherit; font-size: 13px; cursor: pointer;
+  padding: 8px 13px; border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--page); color: var(--text-primary);
+}
+button:hover:not(:disabled) { background: color-mix(in srgb, var(--series-1) 10%, transparent); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+button.primary {
+  width: 100%; padding: 10px; font-weight: 600;
+  background: var(--series-1); color: #fff; border-color: transparent;
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+
+button.link {
+  background: none; border: none; padding: 4px 0;
+  color: var(--series-1); text-decoration: underline; width: auto;
+}
+button.link:hover:not(:disabled) { background: none; }
+button.danger, .danger { color: var(--status-critical); }
+
+.auth-links {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid);
+}
+
+/* ------------------------------------------------------ upload & account */
+
+.upload-form { display: flex; flex-wrap: wrap; gap: 0 18px; align-items: flex-end; }
+.upload-form .field { flex: 1 1 180px; }
+.upload-form .check { flex: 1 1 100%; }
+.upload-form button.primary { width: auto; min-width: 120px; margin-bottom: 14px; }
+
+.result { margin-top: 4px; font-size: 13px; }
+.result p { margin: 4px 0; }
+
+.account-panel { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.account-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* ------------------------------------------------------------ review queue */
+
+.warn {
+  font-size: 13px; margin: 0 0 14px; padding: 9px 12px;
+  border-radius: 7px;
+  border-left: 3px solid var(--status-warning);
+  background: color-mix(in srgb, var(--status-warning) 12%, transparent);
+}
+
+.queue-item { padding: 12px 0; border-bottom: 1px solid var(--grid); }
+.queue-item:last-child { border-bottom: 0; }
+.queue-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.queue-head code {
+  font-size: 13px; padding: 2px 7px; border-radius: 5px;
+  background: var(--page); border: 1px solid var(--border);
+}
+.queue-head .muted { font-size: 12px; }
+.queue-actions { display: flex; gap: 8px; margin-top: 9px; flex-wrap: wrap; align-items: center; }
+.queue-actions input {
+  font: inherit; font-size: 13px; padding: 7px 10px; min-width: 190px;
+  color: var(--text-primary); background: var(--page);
+  border: 1px solid var(--border); border-radius: 7px;
+}

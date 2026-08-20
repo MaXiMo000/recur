@@ -12,12 +12,15 @@ that reads transaction data without one.
 from __future__ import annotations
 
 import logging
+import pathlib
 from contextlib import asynccontextmanager
 from datetime import date, timedelta
 
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Query,
                      Request, Response, UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
 import auth
@@ -409,3 +412,26 @@ def health() -> dict:
     with db.admin() as conn:
         conn.execute("SELECT 1")
     return {"status": "ok"}
+
+
+# --------------------------------------------------------------- frontend --
+# Serving the built app from the same origin as the API is a security decision,
+# not a packaging one: a cross-origin frontend needs SameSite=None cookies,
+# which throws away the CSRF protection SameSite is there to give. Same origin
+# also means the CORS config above is unused in production.
+
+_DIST = pathlib.Path(__file__).with_name("web") / "dist"
+
+if _DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str):
+        # Unknown /api/* must 404 as JSON rather than quietly returning the
+        # HTML shell, which would make a typo look like a working endpoint.
+        if full_path.startswith("api/"):
+            raise HTTPException(404, "Not found.")
+        candidate = (_DIST / full_path).resolve()
+        if full_path and candidate.is_file() and candidate.is_relative_to(_DIST.resolve()):
+            return FileResponse(candidate)
+        return FileResponse(_DIST / "index.html")
