@@ -35,6 +35,23 @@ _DATE_FORMATS_INTL = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y",
 # parsing
 # --------------------------------------------------------------------------- #
 
+# Column headers, in the languages a bank export actually arrives in. A
+# maintained list rather than a clever guess: getting the amount column wrong
+# is not an inconvenience, it is wrong numbers presented confidently.
+DATE_WORDS = ("date", "datum", "fecha", "data", "dato", "tarih", "päivä",
+              "buchung", "valuta")
+DESC_WORDS = ("description", "beschreibung", "verwendungszweck", "buchungstext",
+              "merchant", "payee", "narrative", "details", "concepto",
+              "descrizione", "omschrijving", "libellé", "libelle", "tekst",
+              "opis", "name", "particulars")
+AMOUNT_WORDS = ("amount", "betrag", "importe", "importo", "montant", "bedrag",
+                "kwota", "belopp", "beløb", "summa", "value")
+DEBIT_WORDS = ("debit", "withdrawal", "soll", "débito", "debito", "obciążenie",
+               "uttag")
+CREDIT_WORDS = ("credit", "deposit", "haben", "crédito", "credito", "uznanie",
+                "insättning")
+
+
 def pick_column(headers: list[str], *keywords: str, exclude: tuple = ()) -> str | None:
     """First header containing any keyword, in keyword priority order."""
     for kw in keywords:
@@ -98,9 +115,13 @@ def parse_date(raw: str, dayfirst: bool):
     return None
 
 
-def read_rows(path: str, dayfirst: bool, flip_sign: bool, verbose: bool = True):
-    """Yield (posted_date, amount_cents, descriptor). Negative = money out."""
-    with open(path, newline="", encoding="utf-8-sig") as fh:
+def read_rows(fh, dayfirst: bool, flip_sign: bool, verbose: bool = True):
+    """Yield (posted_date, amount_cents, descriptor). Negative = money out.
+
+    Takes an open text stream rather than a path, so an uploaded file can be
+    parsed straight out of memory and never has to touch the server's disk.
+    """
+    if True:
         sample = fh.read(8192)
         fh.seek(0)
         try:
@@ -110,20 +131,22 @@ def read_rows(path: str, dayfirst: bool, flip_sign: bool, verbose: bool = True):
         reader = csv.DictReader(fh, dialect=dialect)
         headers = [h for h in (reader.fieldnames or []) if h]
         if not headers:
-            sys.exit(f"{path}: no header row found")
+            raise ValueError("No header row found in the CSV.")
 
         # "Post Date" beats "Transaction Date" -- posting is when it hit the card.
-        date_col = pick_column(headers, "post date", "posted", "date")
-        desc_col = pick_column(headers, "description", "merchant", "payee",
-                               "narrative", "details", "name")
-        amt_col = pick_column(headers, "amount", exclude=("running", "balance"))
-        debit_col = pick_column(headers, "debit", "withdrawal")
-        credit_col = pick_column(headers, "credit", "deposit")
+        date_col = pick_column(headers, "post date", "posted", *DATE_WORDS)
+        desc_col = pick_column(headers, *DESC_WORDS)
+        amt_col = pick_column(headers, *AMOUNT_WORDS,
+                              exclude=("running", "balance", "saldo", "solde"))
+        debit_col = pick_column(headers, *DEBIT_WORDS)
+        credit_col = pick_column(headers, *CREDIT_WORDS)
 
         if not date_col or not desc_col:
-            sys.exit(f"{path}: could not find date/description columns in {headers}")
+            raise ValueError(
+                f"Could not find date and description columns. Saw: {headers}")
         if not amt_col and not debit_col:
-            sys.exit(f"{path}: could not find an amount or debit column in {headers}")
+            raise ValueError(
+                f"Could not find an amount or debit column. Saw: {headers}")
 
         if verbose:
             print(f"columns -> date={date_col!r} desc={desc_col!r} "
@@ -152,10 +175,11 @@ def read_rows(path: str, dayfirst: bool, flip_sign: bool, verbose: bool = True):
             print(f"skipped {skipped} unparseable rows (blank/summary lines)")
 
 
-def looks_flipped(path: str, dayfirst: bool) -> bool:
+def looks_flipped(fh, dayfirst: bool) -> bool:
     """Amex-style files record charges as positive. If most rows are positive,
     the file almost certainly uses positive=charge."""
-    signs = [c for _, c, _ in read_rows(path, dayfirst, False, verbose=False)]
+    signs = [c for _, c, _ in read_rows(fh, dayfirst, False, verbose=False)]
+    fh.seek(0)
     if not signs:
         return False
     return sum(1 for c in signs if c > 0) / len(signs) > 0.7
@@ -165,12 +189,21 @@ def looks_flipped(path: str, dayfirst: bool) -> bool:
 # load
 # --------------------------------------------------------------------------- #
 
-def load(path: str, account: str, dayfirst: bool, flip_sign: bool) -> None:
-    rows = list(read_rows(path, dayfirst, flip_sign))
-    if not rows:
-        sys.exit("nothing parsed")
+def load(conn, user_id: int, fh, account: str, dayfirst: bool = False,
+         flip_sign: bool | None = None, source: str = "upload",
+         currency: str = "USD", max_rows: int = 200_000) -> dict:
+    """Parse a statement stream into one tenant's raw_transaction rows.
 
-    source = os.path.basename(path)
+    `conn` must already be tenant-scoped (db.tenant), so RLS -- not this
+    function -- is what guarantees the rows land against the right user.
+    """
+    if flip_sign is None:
+        flip_sign = looks_flipped(fh, dayfirst)
+    rows = list(read_rows(fh, dayfirst, flip_sign, verbose=False))
+    if not rows:
+        raise ValueError("No usable rows found in that file.")
+    if len(rows) > max_rows:
+        raise ValueError(f"That file has {len(rows):,} rows; the limit is {max_rows:,}.")
 
     # Two identical charges on the same day are real (two coffees), and
     # re-uploading the same statement must still be a no-op. An occurrence
@@ -181,37 +214,31 @@ def load(path: str, account: str, dayfirst: bool, flip_sign: bool) -> None:
         key = (account, when, cents, desc)
         n = seen[key]
         seen[key] += 1
-        blob = f"{account}|{when}|{cents}|{desc}|{n}"
-        records.append((
-            when, cents, desc, scrub(desc), source,
-            hashlib.sha256(blob.encode()).hexdigest(),
-        ))
+        blob = f"{user_id}|{account}|{when}|{cents}|{desc}|{n}"
+        records.append((when, cents, currency, desc, scrub(desc), source,
+                        hashlib.sha256(blob.encode()).hexdigest()))
 
-    with db.connect() as conn, conn.cursor() as cur:
+    with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO account (label) VALUES (%s) "
-            "ON CONFLICT (label) DO UPDATE SET label = EXCLUDED.label RETURNING id",
-            (account,),
-        )
+            "INSERT INTO account (user_id, label, currency) VALUES (%s, %s, %s) "
+            "ON CONFLICT (user_id, label) DO UPDATE SET label = EXCLUDED.label "
+            "RETURNING id", (user_id, account, currency))
         account_id = cur.fetchone()[0]
-
         cur.executemany(
             "INSERT INTO raw_transaction "
-            "(account_id, posted_date, amount_cents, raw_descriptor, scrubbed,"
-            " source_file, dedup_hash) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (dedup_hash) DO NOTHING",
-            [(account_id, *r) for r in records],
-        )
+            "(user_id, account_id, posted_date, amount_cents, currency,"
+            " raw_descriptor, scrubbed, source_file, dedup_hash) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (user_id, dedup_hash) DO NOTHING",
+            [(user_id, account_id, *r) for r in records])
         inserted = cur.rowcount
-        conn.commit()
+    conn.commit()
+    return {"read": len(records), "inserted": inserted,
+            "duplicates": len(records) - inserted, "account_id": account_id,
+            "flip_sign": flip_sign}
 
-        print(f"\n{len(records)} rows read, {inserted} new, "
-              f"{len(records) - inserted} already present")
-        report(cur, account_id)
 
-
-def report(cur, account_id: int) -> None:
+def report(cur, user_id: int, account_id: int) -> None:
     cur.execute(
         "SELECT scrubbed, count(*), sum(amount_cents) "
         "FROM raw_transaction WHERE account_id = %s AND amount_cents < 0 "
@@ -230,19 +257,27 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv_path")
     ap.add_argument("--account", required=True, help="label, e.g. chase-sapphire")
+    ap.add_argument("--user", type=int, required=True, help="user id to load into")
     ap.add_argument("--flip-sign", action="store_true",
                     help="file records charges as positive (Amex style)")
     ap.add_argument("--dayfirst", action="store_true",
                     help="dates are DD/MM/YYYY rather than MM/DD/YYYY")
     args = ap.parse_args()
 
-    flip = args.flip_sign
-    if not flip and looks_flipped(args.csv_path, args.dayfirst):
-        print("note: most amounts are positive -- treating positive as a charge. "
-              "Override with --flip-sign if that's wrong.")
-        flip = True
-
-    load(args.csv_path, args.account, args.dayfirst, flip)
+    import db
+    db.apply_schema()
+    db.open_pool()
+    try:
+        with db.tenant(args.user) as conn:
+            with open(args.csv_path, newline="", encoding="utf-8-sig") as fh:
+                r = load(conn, args.user, fh, args.account, args.dayfirst,
+                         args.flip_sign or None,
+                         source=os.path.basename(args.csv_path))
+            print(f"{r['read']} rows read, {r['inserted']} new, "
+                  f"{r['duplicates']} already present")
+            report(conn.cursor(), args.user, r["account_id"])
+    finally:
+        db.close_pool()
 
 
 if __name__ == "__main__":

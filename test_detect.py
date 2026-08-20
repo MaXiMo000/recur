@@ -8,7 +8,7 @@ are the cases that break naive gap arithmetic.
 from datetime import date, timedelta
 
 from detect import (coefficient_of_variation, fit_cadence, next_occurrence,
-                    price_changes, status_of)
+                    price_changes, segmented_cv, status_of)
 
 FAILURES = []
 
@@ -78,6 +78,26 @@ def main() -> None:
     check("usage amounts have high CV",
           coefficient_of_variation([350, 6210, 1180, 4400, 900]) > 0.02, True)
 
+    # ---- a price step must not make the series look usage-based. Measured
+    # across the whole series the CV is 0.075 (over the threshold); measured
+    # within the two levels it is 0.0, which is what it actually is.
+    # An even split is the case that bites: with 7-of-12 at the old price the
+    # median deviation is 0 and nothing goes wrong, but 3-and-3 puts the median
+    # between the two levels and every point looks like variance.
+    d6 = monthly_dates(2025, 9, 6, 3)
+    amts = [2499] * 3 + [2699] * 3
+    changes = price_changes(list(zip(d6, amts)))
+    check("whole-series CV wrongly reads as usage-based",
+          coefficient_of_variation(amts) > 0.02, True)
+    check("segmented CV sees two steady levels",
+          segmented_cv(d6, amts, changes), 0.0)
+
+    # ---- genuinely variable amounts are still usage-based
+    d12 = monthly_dates(2025, 9, 12, 3)
+    usage = [350, 6210, 1180, 4400, 900, 5100, 2200, 3300, 1500, 4800, 700, 6000]
+    check("usage-based stays usage-based",
+          segmented_cv(d12, usage, price_changes(list(zip(d12, usage)))) > 0.02, True)
+
     # ---- month-end clamping in the forecast: Jan 31 -> Feb 28, not Mar 3
     check("next monthly occurrence clamps to month length",
           next_occurrence(date(2026, 1, 31), "monthly", 30.44, 31), date(2026, 2, 28))
@@ -94,7 +114,7 @@ def main() -> None:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print("ok  (17 checks)")
+    print("ok  (20 checks)")
 
 
 if __name__ == "__main__":

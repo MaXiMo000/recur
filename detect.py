@@ -166,6 +166,30 @@ def coefficient_of_variation(amounts: list[int]) -> float:
     return _mad([float(a) for a in amounts]) / abs(m)
 
 
+def segmented_cv(dates: list[date], amounts: list[int],
+                 changes: list[tuple[date, int, int]]) -> float:
+    """Variation *within* price levels rather than across them.
+
+    Measured over the whole series, a subscription that went from $15.49 to
+    $17.99 has a CV of 0.075 -- comfortably above the usage-based threshold. It
+    would be filed as a variable-amount charge like AWS, which switches off
+    price-change detection: the step is what makes the series look variable, so
+    finding the step disqualifies you from reporting it. Splitting at each
+    confirmed change gives two segments of CV 0.0, which is the truth.
+    """
+    cuts = {d for d, _, _ in changes}
+    segments: list[list[int]] = []
+    current: list[int] = []
+    for d, a in zip(dates, amounts):
+        if d in cuts and current:
+            segments.append(current)
+            current = []
+        current.append(a)
+    if current:
+        segments.append(current)
+    return max((coefficient_of_variation(s) for s in segments if s), default=0.0)
+
+
 def confidence(n: int, norm_dev: float, cv: float) -> float:
     """More charges, tighter fit and steadier amounts all raise it. Two charges
     can never look certain no matter how neatly they line up."""
@@ -239,7 +263,7 @@ def status_of(last_seen: date, as_of: date, period: float) -> str:
 # DB glue
 # --------------------------------------------------------------------------- #
 
-def detect_all(conn) -> int:
+def detect_all(conn, user_id: int) -> int:
     found = 0
     with conn.cursor() as cur:
         cur.execute("SELECT max(posted_date) FROM raw_transaction")
@@ -257,21 +281,28 @@ def detect_all(conn) -> int:
         )
         groups = cur.fetchall()
 
-        cur.execute("TRUNCATE subscription RESTART IDENTITY CASCADE")
+        # DELETE, not TRUNCATE: TRUNCATE ignores row-level security and would
+        # wipe every tenant's subscriptions, not just this one's.
+        cur.execute("DELETE FROM subscription")
 
         for merchant_id, account_id, dates, amounts in groups:
             fit = fit_cadence(dates)
             if fit is None:
                 continue
             cadence, period, norm_dev, anchor = fit
-            cv = coefficient_of_variation(amounts)
+            # Changes are found first, then variability is measured within the
+            # levels they define -- the other order makes a price rise hide
+            # itself. Both are computed for every series; whether the changes
+            # are *kept* is decided below, once the real CV is known.
+            changes = price_changes(list(zip(dates, amounts)))
+            cv = segmented_cv(dates, amounts, changes)
 
             cur.execute(
-                "INSERT INTO subscription (merchant_id, account_id, cadence, period_days,"
-                " anchor_day, current_amount_cents, amount_cv, charge_count, first_seen,"
-                " last_seen, next_due, status, confidence) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
-                (merchant_id, account_id, cadence, round(period, 2), anchor,
+                "INSERT INTO subscription (user_id, merchant_id, account_id, cadence,"
+                " period_days, anchor_day, current_amount_cents, amount_cv,"
+                " charge_count, first_seen, last_seen, next_due, status, confidence) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                (user_id, merchant_id, account_id, cadence, round(period, 2), anchor,
                  current_amount(amounts), round(cv, 3), len(dates), dates[0], dates[-1],
                  forecast(dates[-1], as_of, cadence, period, anchor),
                  status_of(dates[-1], as_of, period),
@@ -280,14 +311,16 @@ def detect_all(conn) -> int:
             sub_id = cur.fetchone()[0]
             found += 1
 
-            # A merchant whose amount moves every month has no "price" to change.
+            # A merchant whose amount moves within a level has no "price" to
+            # change, so whatever steps were found there are noise.
             if cv <= USAGE_CV:
-                for eff, old, new in price_changes(list(zip(dates, amounts))):
+                for eff, old, new in changes:
                     cur.execute(
-                        "INSERT INTO price_change (subscription_id, effective_date,"
-                        " old_amount_cents, new_amount_cents, pct_change) "
-                        "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        (sub_id, eff, old, new, round((new - old) / old * 100, 2)),
+                        "INSERT INTO price_change (user_id, subscription_id,"
+                        " effective_date, old_amount_cents, new_amount_cents, pct_change) "
+                        "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                        (user_id, sub_id, eff, old, new,
+                         round((new - old) / old * 100, 2)),
                     )
         conn.commit()
     return found
@@ -380,17 +413,22 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--upcoming", nargs="?", type=int, const=30, metavar="DAYS")
     ap.add_argument("--increases", action="store_true")
+    ap.add_argument("--user", type=int, required=True)
     args = ap.parse_args()
 
-    with db.connect() as conn:
-        if args.upcoming:
-            upcoming(conn, args.upcoming)
-        elif args.increases:
-            increases(conn)
-        else:
-            n = detect_all(conn)
-            print(f"{n} recurring series detected")
-            report(conn)
+    db.open_pool()
+    try:
+        with db.tenant(args.user) as conn:
+            if args.upcoming:
+                upcoming(conn, args.upcoming)
+            elif args.increases:
+                increases(conn)
+            else:
+                n = detect_all(conn, args.user)
+                print(f"{n} recurring series detected")
+                report(conn)
+    finally:
+        db.close_pool()
 
 
 if __name__ == "__main__":

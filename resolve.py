@@ -109,23 +109,26 @@ def contains(needle: str, known: list[str]) -> list[str]:
 # DB glue
 # --------------------------------------------------------------------------- #
 
-def _merchant_id(cur, name: str) -> int:
+def _merchant_id(cur, user_id: int, name: str) -> int:
     cur.execute(
-        "INSERT INTO merchant (canonical_name) VALUES (%s) "
-        "ON CONFLICT (canonical_name) DO UPDATE SET canonical_name = EXCLUDED.canonical_name "
-        "RETURNING id",
-        (name,),
+        "INSERT INTO merchant (user_id, canonical_name) VALUES (%s, %s) "
+        "ON CONFLICT (user_id, canonical_name) DO UPDATE "
+        "SET canonical_name = EXCLUDED.canonical_name RETURNING id",
+        (user_id, name),
     )
     return cur.fetchone()[0]
 
 
-def _link(cur, scrubbed: str, merchant_id: int, tier: str, score: float | None) -> None:
+def _link(cur, user_id: int, scrubbed: str, merchant_id: int, tier: str,
+          score: float | None) -> None:
     """Attach a scrubbed string to a merchant and record the alias, so this
     string never costs anything again."""
     cur.execute(
-        "INSERT INTO merchant_alias (scrubbed_pattern, merchant_id, resolved_by, confidence) "
-        "VALUES (%s, %s, %s, %s) ON CONFLICT (scrubbed_pattern) DO NOTHING",
-        (scrubbed, merchant_id, tier, None if score is None else round(score / 100, 3)),
+        "INSERT INTO merchant_alias (user_id, scrubbed_pattern, merchant_id,"
+        " resolved_by, confidence) VALUES (%s, %s, %s, %s, %s) "
+        "ON CONFLICT (user_id, scrubbed_pattern) DO NOTHING",
+        (user_id, scrubbed, merchant_id, tier,
+         None if score is None else round(score / 100, 3)),
     )
     cur.execute(
         "UPDATE raw_transaction SET merchant_id = %s WHERE scrubbed = %s AND merchant_id IS NULL",
@@ -133,18 +136,19 @@ def _link(cur, scrubbed: str, merchant_id: int, tier: str, score: float | None) 
     )
 
 
-def _enqueue(cur, scrubbed: str, n: int, hits: list[tuple[str, float]], reason: str) -> None:
+def _enqueue(cur, user_id: int, scrubbed: str, n: int,
+             hits: list[tuple[str, float]], reason: str) -> None:
     cur.execute(
-        "INSERT INTO resolution_queue (scrubbed, txn_count, candidates, top_score, reason) "
-        "VALUES (%s, %s, %s, %s, %s) "
-        "ON CONFLICT (scrubbed) DO UPDATE SET txn_count = EXCLUDED.txn_count, "
+        "INSERT INTO resolution_queue (user_id, scrubbed, txn_count, candidates,"
+        " top_score, reason) VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (user_id, scrubbed) DO UPDATE SET txn_count = EXCLUDED.txn_count, "
         "candidates = EXCLUDED.candidates, top_score = EXCLUDED.top_score",
-        (scrubbed, n, json.dumps([{"name": h, "score": s} for h, s in hits]),
+        (user_id, scrubbed, n, json.dumps([{"name": h, "score": s} for h, s in hits]),
          hits[0][1] if hits else None, reason),
     )
 
 
-def resolve_all(conn) -> Counter:
+def resolve_all(conn, user_id: int) -> Counter:
     """Most frequent descriptor first, and every merchant created joins the
     known set immediately -- so the dominant spelling of a merchant anchors it,
     and the rarer variants are then compared against it instead of quietly
@@ -168,7 +172,7 @@ def resolve_all(conn) -> Counter:
 
         for s, n in pending:
             if s in aliases:                                   # tier 1
-                _link(cur, s, aliases[s], "exact", None)
+                _link(cur, user_id, s, aliases[s], "exact", None)
                 stats["exact"] += n
                 continue
             if s in queued:                                    # a human owns it
@@ -177,16 +181,16 @@ def resolve_all(conn) -> Counter:
 
             verdict, hits = classify(s, list(merchants))       # tier 2
             if verdict == "match":
-                _link(cur, s, merchants[hits[0][0]], "fuzzy", hits[0][1])
+                _link(cur, user_id, s, merchants[hits[0][0]], "fuzzy", hits[0][1])
                 stats["fuzzy"] += n
             elif verdict in ("ambiguous", "borderline", "suspect"):
-                _enqueue(cur, s, n, hits, verdict)
+                _enqueue(cur, user_id, s, n, hits, verdict)
                 queued.add(s)
                 stats["queued"] += n
             else:
-                mid = _merchant_id(cur, s)
+                mid = _merchant_id(cur, user_id, s)
                 merchants[s] = mid
-                _link(cur, s, mid, "exact", None)
+                _link(cur, user_id, s, mid, "exact", None)
                 stats["new"] += n
 
         conn.commit()
@@ -243,7 +247,7 @@ def print_groups(conn) -> None:
             print(f"      {v}")
 
 
-def review(conn) -> None:
+def review(conn, user_id: int) -> None:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id, scrubbed, txn_count, candidates, reason FROM resolution_queue "
@@ -266,15 +270,15 @@ def review(conn) -> None:
             if choice == "s":
                 continue
             if choice == "n":
-                mid = _merchant_id(cur, scrubbed)
+                mid = _merchant_id(cur, user_id, scrubbed)
             elif choice.isdigit() and 1 <= int(choice) <= len(candidates):
-                mid = _merchant_id(cur, candidates[int(choice) - 1]["name"])
+                mid = _merchant_id(cur, user_id, candidates[int(choice) - 1]["name"])
             else:
                 print("    ?")
                 continue
 
             # A human decision becomes a permanent rule, not a one-off answer.
-            _link(cur, scrubbed, mid, "human", None)
+            _link(cur, user_id, scrubbed, mid, "human", None)
             cur.execute(
                 "UPDATE resolution_queue SET status = 'resolved' WHERE id = %s", (qid,)
             )
@@ -287,15 +291,20 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--review", action="store_true", help="work the pending queue")
     ap.add_argument("--groups", action="store_true", help="show grouped variants")
+    ap.add_argument("--user", type=int, required=True)
     args = ap.parse_args()
 
-    with db.connect() as conn:
-        if args.review:
-            review(conn)
-        elif args.groups:
-            print_groups(conn)
-        else:
-            print_stats(conn, resolve_all(conn))
+    db.open_pool()
+    try:
+        with db.tenant(args.user) as conn:
+            if args.review:
+                review(conn, args.user)
+            elif args.groups:
+                print_groups(conn)
+            else:
+                print_stats(conn, resolve_all(conn, args.user))
+    finally:
+        db.close_pool()
 
 
 if __name__ == "__main__":
