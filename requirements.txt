@@ -1,1 +1,2 @@
 psycopg[binary]>=3.2
+rapidfuzz>=3.9

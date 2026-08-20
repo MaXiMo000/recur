@@ -46,3 +46,22 @@ CREATE TABLE IF NOT EXISTS raw_transaction (
 CREATE INDEX IF NOT EXISTS idx_txn_scrubbed ON raw_transaction (scrubbed);
 CREATE INDEX IF NOT EXISTS idx_txn_merchant_date
     ON raw_transaction (merchant_id, posted_date);
+
+-- ---------------------------------------------------------------- week 2 --
+
+-- Anything the deterministic tiers won't commit to. A human resolution here
+-- writes a merchant_alias row, so the same string is never asked about twice.
+CREATE TABLE IF NOT EXISTS resolution_queue (
+    id             SERIAL PRIMARY KEY,
+    scrubbed       TEXT NOT NULL UNIQUE,
+    txn_count      INTEGER NOT NULL DEFAULT 1,
+    candidates     JSONB NOT NULL DEFAULT '[]',
+    top_score      NUMERIC(5,2),
+    reason         TEXT,
+    status         TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending','resolved','ignored')),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_queue_pending
+    ON resolution_queue (status) WHERE status = 'pending';
