@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+# never commit real statements
+*.csv
+!sample.csv

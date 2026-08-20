@@ -1,0 +1,20 @@
+services:
+  db:
+    # pgvector image now so week 3 doesn't need a swap; the extension stays unused until then.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: recur
+      POSTGRES_PASSWORD: recur
+      POSTGRES_DB: recur
+    ports:
+      - "5433:5432"   # 5433 so it can't collide with a local postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recur"]
+      interval: 3s
+      retries: 10
+
+volumes:
+  pgdata:
