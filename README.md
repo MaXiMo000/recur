@@ -421,3 +421,61 @@ Arabic).
   `UPI/`, `IMPS/`, `NEFT/` and German `SEPA-ELV LASTSCHRIFT` prefixes are left
   in place — harmless, since fuzzy matching ignores extra tokens, but untuned.
 - The trailing-state-code rule only knows US states.
+
+## Deploying
+
+### What NOT to do
+
+**Do not deploy `api.py` to a public host.** It has no authentication at all —
+not weak auth, none. It is safe locally only because nothing outside the machine
+can reach it. On Render or Fly with a real statement loaded, every subscription
+you have is readable by anyone who finds the URL, on the first request.
+
+It also throws away the best property of the project. "This system is
+architecturally incapable of holding a credential" stops being true the moment
+your real financial data is sitting on someone else's server.
+
+### What to do instead: a static demo, no backend
+
+```bash
+./run_all.sh sample.csv demo
+.venv/bin/python resolve.py --review     # clear the queue
+.venv/bin/python detect.py
+.venv/bin/python export_demo.py          # -> web/public/demo.json
+```
+
+Then point Vercel (or Render's Static Site, or GitHub Pages) at the repo;
+`vercel.json` has the build config and security headers already.
+
+The deployed site is the built React app plus one 13 KB JSON file on a CDN.
+**No server, no database, no endpoint, no credential, nothing to rate-limit.**
+The attack surface is a static file.
+
+`export_demo.py` refuses to run if the database contains any merchant that
+isn't in `sample.csv` — publishing your own transactions because a build script
+was too obliging is not a mistake worth being able to make.
+
+The app tries the local API first and falls back to the snapshot, so one code
+path serves both: live against your real data locally, synthetic on the CDN,
+with a `demo · synthetic data` badge when it's the snapshot.
+
+### If you genuinely need the live API deployed
+
+Then it needs, before it goes anywhere public:
+
+1. Authentication on every endpoint — an API key header at minimum, real
+   sessions if more than one person uses it.
+2. Rate limiting (`slowapi` or the platform's).
+3. `allow_origins` locked to the deployed frontend, not `localhost`.
+4. Managed Postgres with TLS, a generated password, and no public port.
+5. Synthetic data only, unless you accept that a host breach is a disclosure of
+   your finances.
+
+That is a real week of work and it makes the project *less* interesting to talk
+about, not more. The static demo shows the same engineering.
+
+### The MCP server does not deploy
+
+It is stdio — a local process on a pipe. There is no port to host. That is the
+design, not a gap: it is why there is no auth to get wrong. Running it means
+pointing Claude Code at the script on your own machine.

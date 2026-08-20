@@ -1,6 +1,26 @@
 import { Fragment, useEffect, useState } from "react";
 
 const API = "http://127.0.0.1:8000/api";
+
+/* The deployed demo has no backend. Rather than a build flag and two code
+   paths, every request tries the local API first and falls back to a frozen
+   snapshot of synthetic data -- so what's on the CDN is exercised by the same
+   code that runs against a live database. */
+let snapshot = null;
+const loadSnapshot = async () => {
+  if (!snapshot) snapshot = fetch(`${import.meta.env.BASE_URL}demo.json`).then((r) => r.json());
+  return snapshot;
+};
+
+const fromSnapshot = async (path) => {
+  const d = await loadSnapshot();
+  if (path === "summary") return d.summary;
+  if (path.startsWith("subscriptions")) return d.subscriptions;
+  if (path.startsWith("upcoming")) return d.upcoming;
+  if (path.startsWith("increases")) return d.increases;
+  if (path.startsWith("history/")) return d.history[path.split("/")[1]] ?? [];
+  throw new Error(`no snapshot for ${path}`);
+};
 const money = (c) => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
 const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
@@ -10,8 +30,10 @@ function useApi(path) {
     let live = true;
     fetch(`${API}/${path}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data) => live && set({ data }))
-      .catch((error) => live && set({ error }));
+      .then((data) => live && set({ data, demo: false }))
+      .catch(() => fromSnapshot(path)
+        .then((data) => live && set({ data, demo: true }))
+        .catch((error) => live && set({ error })));
     return () => { live = false; };
   }, [path]);
   return state;
@@ -152,7 +174,14 @@ export default function App() {
     <div className="wrap">
       <header>
         <h1>Recur</h1>
-        <p>What you're actually paying for · statement through {s.as_of}</p>
+        <p>
+          What you're actually paying for · statement through {s.as_of}
+          {summary.demo && (
+            <span className="pill" style={{ marginLeft: 10 }}>
+              demo · synthetic data
+            </span>
+          )}
+        </p>
       </header>
 
       <div className="tiles">

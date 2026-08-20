@@ -6,3 +6,4 @@ __pycache__/
 !sample.csv
 node_modules/
 web/dist/
+.vercel/
