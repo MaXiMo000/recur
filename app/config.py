@@ -48,6 +48,40 @@ EMAIL_FROM = os.environ.get("RECUR_EMAIL_FROM", "Recur <noreply@localhost>")
 
 REGISTRATION_OPEN = os.environ.get("RECUR_REGISTRATION_OPEN", "1") != "0"
 
+# Error tracking. Optional: with no DSN the SDK is never initialised, so
+# development and CI stay offline.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+
+
+def init_error_tracking() -> None:
+    """Send stack traces somewhere a person will see them.
+
+    send_default_pii stays off and the before_send hook drops the request body,
+    because on this app a captured body is somebody's bank transactions and a
+    captured header is their session cookie. An error tracker that quietly
+    becomes a second copy of the data is worse than no error tracker.
+    """
+    if not SENTRY_DSN:
+        return
+    import sentry_sdk
+
+    def scrub(event, hint):
+        req = event.get("request", {})
+        req.pop("data", None)
+        req.pop("cookies", None)
+        headers = req.get("headers", {})
+        for h in ("Authorization", "Cookie", "authorization", "cookie"):
+            headers.pop(h, None)
+        return event
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=ENV,
+        send_default_pii=False,
+        traces_sample_rate=float(os.environ.get("SENTRY_TRACES", "0.0")),
+        before_send=scrub,
+    )
+
 # Rate limits: (max attempts, window seconds)
 LIMITS = {
     "login": (8, 900),        # per email and per IP

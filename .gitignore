@@ -12,3 +12,4 @@ web/dist/
 .env
 .env.*
 !.env.example
+backups/

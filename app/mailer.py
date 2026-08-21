@@ -18,7 +18,18 @@ from app import config
 log = logging.getLogger("recur.mail")
 
 
+# RFC 2606 reserves these for documentation and testing; mail to them cannot be
+# delivered by anyone. Skipping them keeps the test suite off the network and
+# out of the sending quota, and in production it avoids burning reputation on
+# addresses that were never going to accept mail.
+_UNDELIVERABLE = (".example", ".invalid", ".test", ".localhost",
+                  "@example.com", "@example.net", "@example.org")
+
+
 def _send(to: str, subject: str, body: str) -> None:
+    if any(to.lower().endswith(d) or d in to.lower() for d in _UNDELIVERABLE):
+        log.info("skipping mail to reserved address %s", to)
+        return
     if not config.RESEND_API_KEY:
         log.warning("EMAIL NOT SENT (no provider configured)\n"
                     "  to: %s\n  subject: %s\n%s", to, subject, body)

@@ -11,15 +11,17 @@ that reads transaction data without one.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import pathlib
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import date, timedelta
 
 from fastapi import (Depends, FastAPI, File, Form, HTTPException, Query,
                      Request, Response, UploadFile)
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
@@ -35,15 +37,35 @@ from app.core.detect import CADENCES, USAGE_CV
 PERIOD = dict((c[0], c[1]) for c in CADENCES)
 log = logging.getLogger("recur")
 
+HOUSEKEEPING_SECONDS = 3600
+MAX_PAGE = 500          # nothing returns an unbounded number of rows
+
+
+async def _housekeeping() -> None:
+    """Purging only at startup means a process that stays up for weeks never
+    purges again: expired sessions, spent tokens and rate-limit rows accumulate
+    for as long as the instance lives, which on a healthy deployment is the
+    normal case rather than the exception."""
+    while True:
+        try:
+            auth.purge_expired()
+            oauth.purge_expired()
+        except Exception:
+            log.exception("housekeeping failed")   # never kill the loop
+        await asyncio.sleep(HOUSEKEEPING_SECONDS)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config.check()
+    config.init_error_tracking()
     db.apply_schema()
     db.open_pool()
-    auth.purge_expired()
-    oauth.purge_expired()
+    task = asyncio.create_task(_housekeeping())
     yield
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
     db.close_pool()
 
 
@@ -235,17 +257,40 @@ def delete_me(request: Request, response: Response,
     return {"status": "deleted"}
 
 
+# Table names are literals in this module, never user input.
+_EXPORT_TABLES = ("account", "merchant", "raw_transaction", "subscription",
+                  "price_change", "resolution_queue")
+
+
 @app.get("/api/export")
-def export_everything(uid: int = Depends(current_user)) -> dict:
-    """Portability. The user's own data back, in full, without asking anyone."""
-    with db.tenant(uid) as conn:
-        out = {}
-        for table in ("account", "merchant", "raw_transaction", "subscription",
-                      "price_change", "resolution_queue"):
-            cur = conn.execute(f"SELECT * FROM {table}")   # table names are literals
-            cols = [d.name for d in cur.description]
-            out[table] = [dict(zip(cols, r)) for r in cur.fetchall()]
-    return out
+def export_everything(uid: int = Depends(current_user)) -> StreamingResponse:
+    """Portability: the user's own data back, in full.
+
+    Streamed with a server-side cursor rather than assembled in memory. The
+    previous version built every transaction into a list and then serialised
+    it, so one person with years of statements could take the process down --
+    and this is the one endpoint that is *supposed* to return everything, so a
+    page limit is not the answer here.
+    """
+    def chunks():
+        yield '{\n'
+        with db.tenant(uid) as conn:
+            for t_i, table in enumerate(_EXPORT_TABLES):
+                yield ('' if t_i == 0 else ',\n') + f'  "{table}": [\n'
+                # server_cursor: rows arrive in batches instead of all at once
+                with conn.cursor(name=f"export_{table}") as cur:
+                    cur.itersize = 1000
+                    cur.execute(f"SELECT * FROM {table}")
+                    cols = [d.name for d in cur.description]
+                    for r_i, row in enumerate(cur):
+                        yield ('' if r_i == 0 else ',\n') + "    " + json.dumps(
+                            dict(zip(cols, row)), default=str)
+                yield '\n  ]'
+        yield '\n}\n'
+
+    return StreamingResponse(
+        chunks(), media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="recur-export.json"'})
 
 
 # ------------------------------------------------------------------ data --
@@ -271,6 +316,13 @@ async def upload(request: Request, file: UploadFile = File(...),
     rate_limit("upload", str(uid))
     if not (file.filename or "").lower().endswith((".csv", ".txt", ".tsv")):
         raise HTTPException(400, "Upload a CSV exported from your bank.")
+
+    # Refuse on the declared size first. Reading the body and *then* measuring
+    # it means a 500 MB upload is already in this process's memory by the time
+    # it is rejected.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > pipeline.MAX_BYTES * 2:
+        raise HTTPException(413, "That file is too large.")
     raw = await file.read(pipeline.MAX_BYTES + 1)
     try:
         return pipeline.run(uid, raw, account.strip()[:64] or "card",
@@ -310,13 +362,16 @@ def summary(uid: int = Depends(current_user)) -> dict:
 
 
 @app.get("/api/subscriptions")
-def subscriptions(uid: int = Depends(current_user)) -> list[dict]:
+def subscriptions(limit: int = Query(MAX_PAGE, ge=1, le=MAX_PAGE),
+                  offset: int = Query(0, ge=0),
+                  uid: int = Depends(current_user)) -> list[dict]:
     rows = _rows(uid,
         "SELECT s.id, m.canonical_name AS merchant, s.cadence, s.period_days,"
         "       s.current_amount_cents, s.amount_cv, s.charge_count, s.confidence,"
         "       s.status, s.first_seen, s.last_seen, s.next_due "
         "FROM subscription s JOIN merchant m ON m.id = s.merchant_id "
-        "ORDER BY s.current_amount_cents * (365.25 / s.period_days) DESC")
+        "ORDER BY s.current_amount_cents * (365.25 / s.period_days) DESC "
+        "LIMIT %s OFFSET %s", (limit, offset))
     for r in rows:
         r["annual_cents"] = round(
             r["current_amount_cents"] * 365.25 / PERIOD[r["cadence"]])
@@ -349,22 +404,28 @@ def increases(uid: int = Depends(current_user)) -> list[dict]:
 
 
 @app.get("/api/history/{subscription_id}")
-def history(subscription_id: int, uid: int = Depends(current_user)) -> list[dict]:
+def history(subscription_id: int,
+            limit: int = Query(MAX_PAGE, ge=1, le=MAX_PAGE),
+            offset: int = Query(0, ge=0),
+            uid: int = Depends(current_user)) -> list[dict]:
     return _rows(uid,
         "SELECT t.posted_date, -t.amount_cents AS amount_cents "
         "FROM raw_transaction t JOIN subscription s ON s.merchant_id = t.merchant_id "
         "AND s.account_id = t.account_id "
-        "WHERE s.id = %s AND t.amount_cents < 0 ORDER BY t.posted_date",
-        (subscription_id,))
+        "WHERE s.id = %s AND t.amount_cents < 0 ORDER BY t.posted_date "
+        "LIMIT %s OFFSET %s", (subscription_id, limit, offset))
 
 
 # ---------------------------------------------------------- review queue --
 
 @app.get("/api/review-queue")
-def review_queue(uid: int = Depends(current_user)) -> list[dict]:
+def review_queue(limit: int = Query(MAX_PAGE, ge=1, le=MAX_PAGE),
+                 offset: int = Query(0, ge=0),
+                 uid: int = Depends(current_user)) -> list[dict]:
     return _rows(uid,
         "SELECT id, scrubbed, txn_count, candidates, top_score, reason "
-        "FROM resolution_queue WHERE status = 'pending' ORDER BY txn_count DESC")
+        "FROM resolution_queue WHERE status = 'pending' ORDER BY txn_count DESC "
+        "LIMIT %s OFFSET %s", (limit, offset))
 
 
 class ResolveIn(BaseModel):

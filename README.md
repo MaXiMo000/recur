@@ -114,6 +114,30 @@ goes wrong without it.
 The stdio server still exists for local use: no OAuth round trip to reach a
 database on your own machine, and no network surface to attack.
 
+## Operations
+
+**Backups.** `scripts/backup.sh` dumps *and then restores into a scratch
+database*, because a backup nobody has restored is a file, not a backup. It
+refuses to run when `pg_dump` is newer than the server: a newer client emits
+settings an older server cannot parse, so the dump is written happily and fails
+only at restore time. That is exactly how it failed the first time it ran here.
+
+**Error tracking.** Set `SENTRY_DSN` and stack traces go somewhere a person
+sees them. With no DSN the SDK is never initialised, so development and CI stay
+offline. `send_default_pii` is off and the `before_send` hook strips the request
+body, cookies and Authorization header — on this app a captured body is
+somebody's bank transactions, and an error tracker that quietly becomes a second
+copy of the data is worse than none.
+
+**Housekeeping.** Expired sessions, spent tokens and rate-limit rows are purged
+hourly by a background task, not only at startup — a healthy instance stays up
+for weeks, so startup-only purging never runs again.
+
+**Mail.** Addresses on RFC 2606 reserved domains (`example.com`, `.test`,
+`.invalid`) are never attempted. Nothing can deliver to them, so the attempt
+only burns quota and sending reputation — and it keeps the test suite off the
+network.
+
 ## Deploying to Render
 
 ```bash

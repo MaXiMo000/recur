@@ -56,6 +56,10 @@ services:
       - key: RECUR_REGISTRATION_OPEN
         value: "1"
 
+      # Optional. Leave unset and no error tracking is initialised at all.
+      - key: SENTRY_DSN
+        sync: false
+
       # Set this in the Render dashboard, not here. Without it the service
       # refuses to start rather than writing verification links to the log.
       - key: RESEND_API_KEY
