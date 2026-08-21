@@ -50,8 +50,19 @@ services:
       - key: RECUR_POOL_MAX
         value: "8"
 
+      # Closed until a sending domain is verified. From the shared sandbox
+      # sender (onboarding@resend.dev) Resend delivers only to the address that
+      # owns the account and returns 200 for everyone else -- so open signup
+      # would hand every other user a "check your email" screen, no email, and
+      # no error anywhere explaining it. Flip to "1" the day a domain verifies.
+      #
+      # Bootstrapping your own account: this gate blocks /api/auth/register for
+      # everyone, and there is no admin path around it. So on the first deploy,
+      # set this to "1" in the Render *dashboard* (a dashboard edit outlives
+      # deploys and is reverted only by an explicit Blueprint sync), register,
+      # verify, then set it back to "0". The safe value is what lives in git.
       - key: RECUR_REGISTRATION_OPEN
-        value: "1"
+        value: "0"
 
       # Optional. Leave unset and no error tracking is initialised at all.
       - key: SENTRY_DSN
