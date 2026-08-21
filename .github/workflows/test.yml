@@ -1,0 +1,92 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # pgvector image to match production exactly; the extension is unused.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: recur
+          POSTGRES_PASSWORD: recur
+          POSTGRES_DB: recur
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U recur"
+          --health-interval 3s --health-timeout 5s --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt && pip install -e .
+
+      - name: Run every check
+        env:
+          RECUR_DSN: postgresql://recur:recur@127.0.0.1:5433/recur
+        run: |
+          failed=0
+          for t in tests/test_*.py; do
+            echo "── $t"
+            python "$t" || failed=1
+          done
+          exit $failed
+
+      - name: Benchmark against known ground truth
+        env:
+          RECUR_DSN: postgresql://recur:recur@127.0.0.1:5433/recur
+        run: |
+          python scripts/make_sample.py > sample.csv
+          python - <<'PY'
+          from app import auth, db
+          db.apply_schema(); db.open_pool()
+          uid, t = auth.register("ci@recurdemo.org", "a-perfectly-fine-password")
+          auth.consume_email_token(t, "verify")
+          from app import pipeline
+          pipeline.run(uid, open("sample.csv","rb").read(), "ci")
+          # Answer the queue the way the tests do, so the benchmark scores a
+          # fully-resolved dataset rather than a partly-resolved one.
+          with db.tenant(uid) as c:
+              for qid, scrubbed, cands in c.execute(
+                      "SELECT id, scrubbed, candidates FROM resolution_queue "
+                      "WHERE status='pending'").fetchall():
+                  name = cands[0]["name"] if cands else scrubbed
+                  mid = c.execute(
+                      "INSERT INTO merchant (user_id, canonical_name) VALUES (%s,%s) "
+                      "ON CONFLICT (user_id, canonical_name) DO UPDATE SET "
+                      "canonical_name=EXCLUDED.canonical_name RETURNING id",
+                      (uid, name)).fetchone()[0]
+                  c.execute("UPDATE raw_transaction SET merchant_id=%s WHERE scrubbed=%s",
+                            (mid, scrubbed))
+                  c.execute("UPDATE resolution_queue SET status='resolved' WHERE id=%s", (qid,))
+              c.commit()
+          pipeline.rerun(uid)
+          with open("/tmp/uid", "w") as f: f.write(str(uid))
+          PY
+          python scripts/benchmark.py --user "$(cat /tmp/uid)"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image is what actually ships, so a broken Dockerfile should fail
+      # here rather than on Render.
+      - run: docker build -t recur:ci .
+      - name: Production refuses to start without its secrets
+        run: |
+          if docker run --rm -e RECUR_ENV=production recur:ci 2>&1 | grep -q "required settings are missing"; then
+            echo "ok: production config is gated"
+          else
+            echo "FAIL: production started, or failed for the wrong reason"; exit 1
+          fi

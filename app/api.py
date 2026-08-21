@@ -192,6 +192,10 @@ def logout(request: Request, response: Response) -> dict:
 @app.post("/api/auth/forgot", status_code=202)
 def forgot(body: EmailIn, request: Request) -> dict:
     rate_limit("reset", client_ip(request))
+    # Also per address. Limiting only by IP lets someone rotate IPs and flood a
+    # person's inbox with reset mail. Applied before the lookup and regardless
+    # of whether the account exists, so a 429 does not reveal that it does.
+    rate_limit("reset", body.email.lower())
     with db.admin() as conn:
         row = conn.execute("SELECT id FROM app_user WHERE email = %s",
                            (body.email.lower(),)).fetchone()

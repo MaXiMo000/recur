@@ -187,10 +187,18 @@ def end_session(token: str | None) -> None:
 
 def purge_expired() -> int:
     """Expired sessions and used tokens are data with no purpose. Keeping them
-    is retention without a reason."""
+    is retention without a reason.
+
+    auth_attempt is included because it is otherwise append-only: it is written
+    on every login, registration and upload and only ever deleted for one key
+    on a successful login. Left alone it grows without bound, and it sits on the
+    hot path of every authentication request.
+    """
     with db.admin() as conn:
         n = conn.execute("DELETE FROM session WHERE expires_at < now()").rowcount
         conn.execute("DELETE FROM email_token WHERE expires_at < now()")
+        # Longer than the widest rate-limit window, so nothing in force is lost.
+        conn.execute("DELETE FROM auth_attempt WHERE at < now() - interval '24 hours'")
         conn.commit()
         return n
 
