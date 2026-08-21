@@ -4,7 +4,13 @@ import { api, ApiError } from "./api";
 import { AuthScreen, TokenScreen } from "./Auth";
 import { AccountPanel, ReviewQueue, Upload } from "./Upload";
 
-const money = (c) => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+/* Intl knows each currency's minor-unit count, so passing the raw integer
+   scaled by the right power of ten formats yen without a decimal point and
+   dinars with three -- rather than assuming everything is hundredths. */
+const money = (minor, currency = "USD", digits = 2) =>
+  (minor / 10 ** digits).toLocaleString(undefined,
+    { style: "currency", currency, minimumFractionDigits: digits,
+      maximumFractionDigits: digits });
 const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US",
                                                                { month: "short", day: "numeric" });
 
@@ -113,8 +119,8 @@ function Subscriptions({ rows }) {
                 {r.status !== "active" && <span className="pill" style={{ marginLeft: 8 }}>{r.status}</span>}
               </td>
               <td className="muted">{r.cadence}</td>
-              <td className="num">{money(r.current_amount_cents)}</td>
-              <td className="num">{money(r.annual_cents)}</td>
+              <td className="num">{money(r.current_amount_cents, r.currency, r.minor_digits)}</td>
+              <td className="num">{money(r.annual_cents, r.currency, r.minor_digits)}</td>
               <td className="bar-cell">
                 <div className="bar-track">
                   <div className="bar-fill" style={{ width: `${(r.annual_cents / max) * 100}%` }} />
@@ -181,30 +187,41 @@ function Dashboard({ me, onSignedOut }) {
         </p>
       )}
 
-      {s && subs.data?.length > 0 && (
+      {s && s.totals?.length > 0 && subs.data?.length > 0 && (
         <>
-          <div className="tiles" style={{ marginTop: 28 }}>
-            <div className="card">
-              <div className="tile-label">Recurring spend</div>
-              <div className="tile-value hero">{money(s.annual_cents)}</div>
-              <div className="tile-note">per year · {money(s.monthly_cents)}/mo</div>
-            </div>
-            <div className="card">
-              <div className="tile-label">Active subscriptions</div>
-              <div className="tile-value">{s.active_count}</div>
-              <div className="tile-note">
-                {s.inactive_count ? `${s.inactive_count} lapsed or cancelled` : "none lapsed"}
+          {s.totals.map((t) => (
+            <div className="tiles" style={{ marginTop: 28 }} key={t.currency}>
+              <div className="card">
+                <div className="tile-label">
+                  Recurring spend{s.totals.length > 1 && <> · {t.currency}</>}
+                </div>
+                <div className="tile-value hero">
+                  {money(t.annual_minor, t.currency, t.minor_digits)}
+                </div>
+                <div className="tile-note">
+                  per year · {money(t.monthly_minor, t.currency, t.minor_digits)}/mo
+                </div>
+              </div>
+              <div className="card">
+                <div className="tile-label">Active subscriptions</div>
+                <div className="tile-value">{t.active_count}</div>
+                <div className="tile-note">
+                  {t.inactive_count ? `${t.inactive_count} lapsed or cancelled`
+                                    : "none lapsed"}
+                </div>
+              </div>
+              <div className="card">
+                <div className="tile-label">Price rises</div>
+                <div className="tile-value" style={{
+                  color: t.price_increase_annual_minor > 0
+                    ? "var(--status-critical)" : undefined }}>
+                  {t.price_increase_annual_minor > 0 ? "+" : ""}
+                  {money(t.price_increase_annual_minor, t.currency, t.minor_digits)}
+                </div>
+                <div className="tile-note">added per year</div>
               </div>
             </div>
-            <div className="card">
-              <div className="tile-label">Price rises</div>
-              <div className="tile-value" style={{
-                color: s.price_increase_annual_cents > 0 ? "var(--status-critical)" : undefined }}>
-                {s.price_increase_annual_cents > 0 ? "+" : ""}{money(s.price_increase_annual_cents)}
-              </div>
-              <div className="tile-note">added per year</div>
-            </div>
-          </div>
+          ))}
 
           <h2>Subscriptions <span>· click a row for its price history</span></h2>
           <div className="card"><Subscriptions rows={subs.data} /></div>
@@ -218,7 +235,7 @@ function Dashboard({ me, onSignedOut }) {
                     <div className="row" key={i}>
                       <span className="date">{day(r.next_due)}</span>
                       <span className="grow">{r.merchant}</span>
-                      <span>{money(r.current_amount_cents)}</span>
+                      <span>{money(r.current_amount_cents, r.currency)}</span>
                     </div>
                   ))}
                   <div className="row" style={{ fontWeight: 650 }}>
@@ -241,12 +258,12 @@ function Dashboard({ me, onSignedOut }) {
                     <span className="date">{day(r.effective_date)}</span>
                     <span className="grow">{r.merchant}</span>
                     <span className="muted">
-                      {money(r.old_amount_cents)} → {money(r.new_amount_cents)}
+                      {money(r.old_amount_cents, r.currency)} → {money(r.new_amount_cents, r.currency)}
                     </span>
                     <span className={up ? "up" : "down"}
                           style={{ minWidth: 118, textAlign: "right" }}>
                       {up ? "▲" : "▼"} {up ? "+" : ""}{Number(r.pct_change).toFixed(1)}% ·{" "}
-                      {money(r.annual_impact_cents)}/yr
+                      {money(r.annual_impact_cents, r.currency)}/yr
                     </span>
                   </div>
                 );

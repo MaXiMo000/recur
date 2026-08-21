@@ -128,7 +128,10 @@ CREATE TABLE IF NOT EXISTS subscription (
     cadence              TEXT NOT NULL,
     period_days          NUMERIC(7,2) NOT NULL,
     anchor_day           SMALLINT,
+    -- Minor units of `currency`, which is not always hundredths: yen has no
+    -- fractional part at all. See app/core/money.py.
     current_amount_cents BIGINT NOT NULL,
+    currency             TEXT NOT NULL DEFAULT 'USD',
     amount_cv            NUMERIC(5,3) NOT NULL,
     charge_count         INTEGER NOT NULL,
     first_seen           DATE NOT NULL,

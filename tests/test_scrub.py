@@ -50,6 +50,21 @@ AMOUNTS = [
     ("", None), ("--", None),
 ]
 
+# Currency is not always hundredths. Yen has no fractional part, dinars have
+# three digits, and reading either as hundredths is off by 100x or 10x.
+AMOUNTS_BY_CURRENCY = [
+    ("15.49", "USD", 1549),
+    ("1,234.56", "USD", 123456),
+    ("1.234", "USD", 123400),      # three digits after a dot: thousands, in USD
+    ("1200", "JPY", 1200),         # 1200 yen, not 12.00
+    ("1,200", "JPY", 1200),
+    ("12.00", "JPY", 12),          # exporter-added decimals, not 1200 yen
+    ("1,234,567", "JPY", 1234567),
+    ("1.234", "KWD", 1234),        # three digits after a dot: a real fraction
+    ("1.234,56", "EUR", 123456),
+    ("(45.00)", "USD", -4500),
+]
+
 
 def main() -> None:
     from app.core.ingest import parse_amount
@@ -58,6 +73,11 @@ def main() -> None:
         got = parse_amount(raw)
         if got != want:
             failures.append(f"  amount {raw!r}\n    expected {want!r}\n    got      {got!r}")
+    for raw, cur, want in AMOUNTS_BY_CURRENCY:
+        got = parse_amount(raw, cur)
+        if got != want:
+            failures.append(
+                f"  amount {raw!r} in {cur}\n    expected {want!r}\n    got      {got!r}")
     for raw, expected in CASES:
         got = scrub(raw)
         if got != expected:
@@ -69,7 +89,8 @@ def main() -> None:
         print(f"FAIL ({len(failures)})")
         print("\n".join(failures))
         raise SystemExit(1)
-    print(f"ok  ({len(CASES)} descriptors, {len(AMOUNTS)} amounts)")
+    print(f"ok  ({len(CASES)} descriptors, {len(AMOUNTS)} amounts, "
+          f"{len(AMOUNTS_BY_CURRENCY)} currency amounts)")
 
 
 if __name__ == "__main__":

@@ -274,7 +274,7 @@ def detect_all(conn, user_id: int) -> int:
 
         cur.execute(
             "SELECT merchant_id, account_id, array_agg(posted_date ORDER BY posted_date), "
-            "       array_agg(-amount_cents ORDER BY posted_date) "
+            "       array_agg(-amount_cents ORDER BY posted_date), min(currency) "
             "FROM raw_transaction WHERE merchant_id IS NOT NULL AND amount_cents < 0 "
             "GROUP BY merchant_id, account_id HAVING count(*) >= %s",
             (MIN_CHARGES,),
@@ -285,7 +285,7 @@ def detect_all(conn, user_id: int) -> int:
         # wipe every tenant's subscriptions, not just this one's.
         cur.execute("DELETE FROM subscription")
 
-        for merchant_id, account_id, dates, amounts in groups:
+        for merchant_id, account_id, dates, amounts, currency in groups:
             fit = fit_cadence(dates)
             if fit is None:
                 continue
@@ -299,11 +299,12 @@ def detect_all(conn, user_id: int) -> int:
 
             cur.execute(
                 "INSERT INTO subscription (user_id, merchant_id, account_id, cadence,"
-                " period_days, anchor_day, current_amount_cents, amount_cv,"
+                " period_days, anchor_day, current_amount_cents, currency, amount_cv,"
                 " charge_count, first_seen, last_seen, next_due, status, confidence) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (user_id, merchant_id, account_id, cadence, round(period, 2), anchor,
-                 current_amount(amounts), round(cv, 3), len(dates), dates[0], dates[-1],
+                 current_amount(amounts), currency or 'USD', round(cv, 3),
+                 len(dates), dates[0], dates[-1],
                  forecast(dates[-1], as_of, cadence, period, anchor),
                  status_of(dates[-1], as_of, period),
                  confidence(len(dates), norm_dev, cv)),

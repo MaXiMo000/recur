@@ -121,6 +121,28 @@ def main() -> None:
             n = conn.execute("SELECT count(*) FROM raw_transaction").fetchone()[0]
         check("deleting bob leaves alice's transactions", n, 7)
 
+        # --- currencies must never be added together, and renaming an
+        # account must not duplicate its history.
+        jpy = b"Date,Description,Amount\n" + b"".join(
+            f"{m:02d}/09/2026,SPOTIFY JP,-1200\n".encode() for m in range(1, 7))
+        pipeline.run(alice, jpy, "alice-jp", currency="JPY")
+        with db.tenant(alice) as conn:
+            amt, cur = conn.execute(
+                "SELECT current_amount_cents, currency FROM subscription s "
+                "JOIN merchant m ON m.id = s.merchant_id "
+                "WHERE m.canonical_name LIKE 'SPOTIFY%'").fetchone()
+        check("yen is stored as whole yen, not hundredths", (amt, cur), (1200, "JPY"))
+
+        with db.tenant(alice) as conn:
+            before = conn.execute("SELECT count(*) FROM raw_transaction").fetchone()[0]
+            conn.execute("UPDATE account SET label = 'renamed' WHERE label = 'alice-jp'")
+            conn.commit()
+        pipeline.run(alice, jpy, "renamed", currency="JPY")
+        with db.tenant(alice) as conn:
+            after = conn.execute("SELECT count(*) FROM raw_transaction").fetchone()[0]
+        check("renaming an account does not duplicate its transactions",
+              after, before)
+
         with db.admin() as conn:
             conn.execute("DELETE FROM app_user WHERE email LIKE %s", ("%@example.com",))
             conn.commit()
@@ -131,7 +153,7 @@ def main() -> None:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print("ok  (16 pipeline checks)")
+    print("ok  (18 pipeline checks)")
 
 
 if __name__ == "__main__":

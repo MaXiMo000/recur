@@ -32,6 +32,7 @@ from app import mailer
 from app import mcp_http
 from app import oauth
 from app import pipeline
+from app.core import money
 from app.core.detect import CADENCES, USAGE_CV
 
 PERIOD = dict((c[0], c[1]) for c in CADENCES)
@@ -85,6 +86,14 @@ async def security_headers(request: Request, call_next):
     r = await call_next(request)
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["X-Frame-Options"] = "DENY"
+    # 'unsafe-inline' for style only: React's style={{...}} props compile to
+    # inline styles. Scripts stay 'self', which is the half that matters --
+    # merchant names come off a user's CSV and are rendered on this page.
+    r.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
+        "object-src 'none'")
     r.headers["Referrer-Policy"] = "no-referrer"
     r.headers["Cache-Control"] = "no-store"
     if config.IS_PROD:
@@ -339,23 +348,49 @@ async def upload(request: Request, file: UploadFile = File(...),
 
 @app.get("/api/summary")
 def summary(uid: int = Depends(current_user)) -> dict:
-    rows = _rows(uid, "SELECT cadence, current_amount_cents, status FROM subscription")
-    active = [r for r in rows if r["status"] == "active"]
-    annual = sum(r["current_amount_cents"] * 365.25 / PERIOD[r["cadence"]]
-                 for r in active)
-    changes = _rows(uid, "SELECT p.new_amount_cents - p.old_amount_cents AS d,"
-                         " s.period_days FROM price_change p"
-                         " JOIN subscription s ON s.id = p.subscription_id")
+    """Totals per currency, never one figure across them.
+
+    A USD subscription plus a JPY one is not an approximation when added
+    together, it is a meaningless number presented as a fact. There is no
+    conversion either: FX would need a rate source and an answer to "which
+    day's rate" that nobody agrees on. Reporting each currency separately is
+    correct and needs neither.
+    """
+    rows = _rows(uid, "SELECT cadence, current_amount_cents, currency, status "
+                      "FROM subscription")
+    by_currency: dict[str, dict] = {}
+    for r in rows:
+        cur = (r["currency"] or "USD").upper()
+        bucket = by_currency.setdefault(cur, {
+            "currency": cur, "annual_minor": 0, "active_count": 0,
+            "inactive_count": 0, "price_increase_annual_minor": 0,
+            "minor_digits": money.minor_units(cur)})
+        if r["status"] == "active":
+            bucket["active_count"] += 1
+            bucket["annual_minor"] += round(
+                r["current_amount_cents"] * 365.25 / PERIOD[r["cadence"]])
+        else:
+            bucket["inactive_count"] += 1
+
+    for c in _rows(uid,
+            "SELECT p.new_amount_cents - p.old_amount_cents AS d, s.period_days,"
+            "       s.currency FROM price_change p "
+            "JOIN subscription s ON s.id = p.subscription_id"):
+        cur = (c["currency"] or "USD").upper()
+        if cur in by_currency:
+            by_currency[cur]["price_increase_annual_minor"] += round(
+                c["d"] * 365.25 / float(c["period_days"]))
+
+    for b in by_currency.values():
+        b["monthly_minor"] = round(b["annual_minor"] / 12)
+
     pending = _rows(uid, "SELECT count(*) AS n FROM resolution_queue"
                          " WHERE status = 'pending'")[0]["n"]
     return {
         "as_of": _as_of(uid),
-        "active_count": len(active),
-        "inactive_count": len(rows) - len(active),
-        "annual_cents": round(annual),
-        "monthly_cents": round(annual / 12),
-        "price_increase_annual_cents": round(
-            sum(c["d"] * 365.25 / float(c["period_days"]) for c in changes)),
+        "totals": sorted(by_currency.values(), key=lambda b: -b["annual_minor"]),
+        "active_count": sum(b["active_count"] for b in by_currency.values()),
+        "inactive_count": sum(b["inactive_count"] for b in by_currency.values()),
         # Surfaced because an unworked queue makes every figure above too low.
         "awaiting_review": pending,
     }
@@ -367,7 +402,8 @@ def subscriptions(limit: int = Query(MAX_PAGE, ge=1, le=MAX_PAGE),
                   uid: int = Depends(current_user)) -> list[dict]:
     rows = _rows(uid,
         "SELECT s.id, m.canonical_name AS merchant, s.cadence, s.period_days,"
-        "       s.current_amount_cents, s.amount_cv, s.charge_count, s.confidence,"
+        "       s.current_amount_cents, s.currency, s.amount_cv, s.charge_count,"
+        "       s.confidence,"
         "       s.status, s.first_seen, s.last_seen, s.next_due "
         "FROM subscription s JOIN merchant m ON m.id = s.merchant_id "
         "ORDER BY s.current_amount_cents * (365.25 / s.period_days) DESC "
@@ -376,6 +412,7 @@ def subscriptions(limit: int = Query(MAX_PAGE, ge=1, le=MAX_PAGE),
         r["annual_cents"] = round(
             r["current_amount_cents"] * 365.25 / PERIOD[r["cadence"]])
         r["usage_based"] = float(r["amount_cv"]) > USAGE_CV
+        r["minor_digits"] = money.minor_units(r["currency"] or "USD")
     return rows
 
 
@@ -384,7 +421,7 @@ def upcoming(days: int = Query(30, ge=1, le=365),
              uid: int = Depends(current_user)) -> list[dict]:
     return _rows(uid,
         "SELECT m.canonical_name AS merchant, s.next_due, s.current_amount_cents,"
-        "       s.cadence FROM subscription s JOIN merchant m ON m.id = s.merchant_id "
+        "       s.currency, s.cadence FROM subscription s JOIN merchant m ON m.id = s.merchant_id "
         "WHERE s.status = 'active' AND s.next_due <= %s ORDER BY s.next_due",
         (_as_of(uid) + timedelta(days=days),))
 

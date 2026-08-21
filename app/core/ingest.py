@@ -22,6 +22,7 @@ from collections import Counter
 from datetime import datetime
 
 from app import db
+from app.core.money import minor_units, to_minor
 from app.core.scrub import scrub
 
 _DATE_FORMATS_US = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y",
@@ -62,7 +63,7 @@ def pick_column(headers: list[str], *keywords: str, exclude: tuple = ()) -> str 
     return None
 
 
-def parse_amount(raw: str) -> int | None:
+def parse_amount(raw: str, currency: str = "USD") -> int | None:
     """'$1,234.56', '1.234,56', '1 234,56', '(45.00)' -> integer cents.
 
     Half the world writes 1.234,56 for what the US writes as 1,234.56. Stripping
@@ -79,13 +80,28 @@ def parse_amount(raw: str) -> int | None:
     if not s:
         return None
 
+    # How many trailing digits can be a fraction depends on the currency: three
+    # digits after the separator is a thousands group in dollars but a genuine
+    # fraction in dinars, and in yen there is no fractional part at all. Getting
+    # these two rules to interact correctly is the whole point of this block.
+    places = minor_units(currency)
+    fractional = range(1, places + 1)
+
+    # Zero-decimal currencies still show up written as "12.00" by exporters
+    # that format every amount the same way. Two trailing digits there is a
+    # spurious fraction to discard, not a thousands group -- reading it as
+    # thousands turns 12 yen into 1200.
+    spurious = places == 0 and len(s) > 3 and s[-3] in ".," and s[-2:].isdigit()
+    if spurious:
+        s = s[:-3]
+
     dot, comma = s.rfind("."), s.rfind(",")
     if dot > -1 and comma > -1:
         dec = "." if dot > comma else ","
     elif comma > -1:
-        dec = "," if len(s) - comma - 1 in (1, 2) else None
+        dec = "," if len(s) - comma - 1 in fractional else None
     elif dot > -1:
-        dec = "." if len(s) - dot - 1 in (1, 2) else None
+        dec = "." if len(s) - dot - 1 in fractional else None
     else:
         dec = None
 
@@ -99,10 +115,12 @@ def parse_amount(raw: str) -> int | None:
     if not s or s in {"-", "."}:
         return None
     try:
-        cents = round(float(s) * 100)
+        # Scaled by the currency's own minor-unit count, not always by 100:
+        # multiplying yen by 100 inflates a Japanese statement 100-fold.
+        units = to_minor(float(s), currency)
     except ValueError:
         return None
-    return -abs(cents) if negative else cents
+    return -abs(units) if negative else units
 
 
 def parse_date(raw: str, dayfirst: bool):
@@ -115,7 +133,8 @@ def parse_date(raw: str, dayfirst: bool):
     return None
 
 
-def read_rows(fh, dayfirst: bool, flip_sign: bool, verbose: bool = True):
+def read_rows(fh, dayfirst: bool, flip_sign: bool, verbose: bool = True,
+              currency: str = "USD"):
     """Yield (posted_date, amount_cents, descriptor). Negative = money out.
 
     Takes an open text stream rather than a path, so an uploaded file can be
@@ -158,11 +177,11 @@ def read_rows(fh, dayfirst: bool, flip_sign: bool, verbose: bool = True):
             desc = (row.get(desc_col) or "").strip()
 
             if debit_col and not amt_col:
-                debit = parse_amount(row.get(debit_col, ""))
-                credit = parse_amount(row.get(credit_col, "")) if credit_col else None
+                debit = parse_amount(row.get(debit_col, ""), currency)
+                credit = parse_amount(row.get(credit_col, ""), currency) if credit_col else None
                 cents = -abs(debit) if debit else (abs(credit) if credit else None)
             else:
-                cents = parse_amount(row.get(amt_col, ""))
+                cents = parse_amount(row.get(amt_col, ""), currency)
                 if cents is not None and flip_sign:
                     cents = -cents
 
@@ -175,10 +194,11 @@ def read_rows(fh, dayfirst: bool, flip_sign: bool, verbose: bool = True):
             print(f"skipped {skipped} unparseable rows (blank/summary lines)")
 
 
-def looks_flipped(fh, dayfirst: bool) -> bool:
+def looks_flipped(fh, dayfirst: bool, currency: str = "USD") -> bool:
     """Amex-style files record charges as positive. If most rows are positive,
     the file almost certainly uses positive=charge."""
-    signs = [c for _, c, _ in read_rows(fh, dayfirst, False, verbose=False)]
+    signs = [c for _, c, _ in read_rows(fh, dayfirst, False, verbose=False,
+                                        currency=currency)]
     fh.seek(0)
     if not signs:
         return False
@@ -198,8 +218,8 @@ def load(conn, user_id: int, fh, account: str, dayfirst: bool = False,
     function -- is what guarantees the rows land against the right user.
     """
     if flip_sign is None:
-        flip_sign = looks_flipped(fh, dayfirst)
-    rows = list(read_rows(fh, dayfirst, flip_sign, verbose=False))
+        flip_sign = looks_flipped(fh, dayfirst, currency)
+    rows = list(read_rows(fh, dayfirst, flip_sign, verbose=False, currency=currency))
     if not rows:
         raise ValueError("No usable rows found in that file.")
     if len(rows) > max_rows:
@@ -208,22 +228,26 @@ def load(conn, user_id: int, fh, account: str, dayfirst: bool = False,
     # Two identical charges on the same day are real (two coffees), and
     # re-uploading the same statement must still be a no-op. An occurrence
     # index inside each duplicate group gives both behaviours from one hash.
-    seen: Counter = Counter()
-    records = []
-    for when, cents, desc in rows:
-        key = (account, when, cents, desc)
-        n = seen[key]
-        seen[key] += 1
-        blob = f"{user_id}|{account}|{when}|{cents}|{desc}|{n}"
-        records.append((when, cents, currency, desc, scrub(desc), source,
-                        hashlib.sha256(blob.encode()).hexdigest()))
-
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO account (user_id, label, currency) VALUES (%s, %s, %s) "
             "ON CONFLICT (user_id, label) DO UPDATE SET label = EXCLUDED.label "
             "RETURNING id", (user_id, account, currency))
         account_id = cur.fetchone()[0]
+
+        # Keyed on account_id, not the label. Hashing the label meant renaming
+        # an account made every transaction in it look new, and a second upload
+        # duplicated the entire history.
+        seen: Counter = Counter()
+        records = []
+        for when, cents, desc in rows:
+            key = (account_id, when, cents, desc)
+            n = seen[key]
+            seen[key] += 1
+            blob = f"{user_id}|{account_id}|{when}|{cents}|{desc}|{n}"
+            records.append((when, cents, currency, desc, scrub(desc), source,
+                            hashlib.sha256(blob.encode()).hexdigest()))
+
         cur.executemany(
             "INSERT INTO raw_transaction "
             "(user_id, account_id, posted_date, amount_cents, currency,"

@@ -92,6 +92,30 @@ brute-force mid-attempt.
 fails at startup — before migrations — listing each missing variable and what
 goes wrong without it.
 
+## Money is per currency, never one number
+
+`/api/summary` used to sum every subscription into a single figure. With a USD
+card and a JPY card loaded it reported **$14,584.68/year** for what was actually
+$15.49/month and ¥1,200/month. Two compounding mistakes:
+
+- **Yen has no minor unit.** ¥1200 is one thousand two hundred yen, not twelve.
+  Scaling by 100 the way you would for dollars inflated the Japanese statement
+  a hundredfold. Amounts are now stored in each currency's own minor unit —
+  0 digits for JPY and KRW, 3 for KWD and BHD, 2 for the rest.
+- **Currencies were added together.** That is not an approximation, it is a
+  meaningless number presented as a fact. Totals are now reported per currency,
+  everywhere: the tiles, the upcoming-charges total, and the API.
+
+There is no FX conversion and there deliberately isn't going to be: it would
+need a rate source, a rate date per transaction, and an answer to "which day's
+rate" that nobody agrees on. Reporting each currency separately is correct and
+needs none of it.
+
+The two rules interact, which is where the last bug hid: three digits after a
+separator is a *thousands group* in dollars but a *real fraction* in dinars, and
+in yen `12.00` is an exporter adding decimals to a whole number rather than
+1,200 of anything. All ten cases are in `tests/test_scrub.py`.
+
 ## Tier 3 (embeddings) was built, measured, and removed
 
 The merchant resolution ladder stops at a real ceiling: `AWS` and `AMAZON WEB

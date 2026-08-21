@@ -21,6 +21,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 
@@ -34,6 +35,11 @@ RESET_TTL = timedelta(hours=1)
 
 MIN_PASSWORD = 12          # length beats mandated punctuation
 MAX_PASSWORD = 1024        # argon2 on a 10MB password is a free DoS
+
+def _check_breached_enabled() -> bool:
+    """Read at call time, not import time, so a test or a CI job can turn it
+    off without having to win a race with module import order."""
+    return os.environ.get("RECUR_CHECK_BREACHED", "1") != "0"
 
 # Burned on a miss so that "no such user" costs the same as "wrong password".
 _DUMMY_HASH = _ph.hash("this hash exists only to be compared against")
@@ -59,9 +65,37 @@ class AuthError(Exception):
     which half of the credential was wrong."""
 
 
+def is_breached(password: str) -> bool:
+    """Has this exact password appeared in a public breach corpus?
+
+    k-anonymity: only the first five characters of the SHA-1 are sent, and the
+    service returns every suffix under that prefix for us to search locally. The
+    password itself never leaves this process, and the API cannot tell which of
+    the ~800 returned hashes was being asked about.
+
+    Fails open. If the service is unreachable, someone signing up should not be
+    blocked -- a length rule still applies, and refusing registrations because a
+    third party is down trades a small risk for a certain outage.
+    """
+    digest = hashlib.sha1(password.encode()).hexdigest().upper()
+    prefix, suffix = digest[:5], digest[5:]
+    try:
+        r = httpx.get(f"https://api.pwnedpasswords.com/range/{prefix}",
+                      headers={"Add-Padding": "true"}, timeout=3)
+        r.raise_for_status()
+    except Exception:
+        return False
+    return any(line.split(":")[0] == suffix for line in r.text.splitlines())
+
+
 def validate_password(password: str) -> None:
     if not MIN_PASSWORD <= len(password) <= MAX_PASSWORD:
         raise AuthError(f"Password must be at least {MIN_PASSWORD} characters.")
+    if _check_breached_enabled() and is_breached(password):
+        # Length is no defence when the exact string is already in a wordlist.
+        raise AuthError(
+            "That password has appeared in a public data breach. "
+            "Please choose a different one.")
 
 
 def register(email: str, password: str) -> tuple[int, str]:
