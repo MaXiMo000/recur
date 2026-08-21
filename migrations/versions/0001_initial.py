@@ -13,7 +13,7 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
-SCHEMA = pathlib.Path(__file__).resolve().parents[2] / "schema.sql"
+SCHEMA = pathlib.Path(__file__).resolve().parents[2] / "app" / "schema.sql"
 
 APP_ROLE = "recur_app"
 

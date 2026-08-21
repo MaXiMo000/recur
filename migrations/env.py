@@ -9,7 +9,7 @@ policies would not be a boundary.
 from alembic import context
 from sqlalchemy import create_engine
 
-import db as recur_db
+from app import db as recur_db
 
 config = context.config
 target_metadata = None

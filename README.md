@@ -26,7 +26,38 @@ test_tenancy   9 isolation checks           test_oauth     26 checks
 test_auth     18 checks
 ```
 
-Run everything: `for t in test_*.py; do .venv/bin/python $t; done`
+Run everything: `for t in tests/test_*.py; do .venv/bin/python $t; done`
+
+## Layout
+
+```
+app/                the application; everything importable lives here
+  core/             the domain logic, no web and no auth
+    scrub.py        tier 0 — descriptor normalization
+    ingest.py       CSV dialect sniffing, sign/date/decimal handling, dedup
+    resolve.py      merchant resolution ladder + review queue
+    detect.py       periodicity, price changes, forecast
+  db.py             connections and the tenant context RLS keys on
+  schema.sql        tables, policies, the recur_current_user_id() function
+  config.py         settings, and the refusal to boot without production ones
+  auth.py           argon2 passwords, sessions, email tokens
+  oauth.py          OAuth 2.1 authorization server (PKCE, audience-bound)
+  mailer.py         Resend adapter
+  pipeline.py       one call: bytes in, detected subscriptions out
+  api.py            FastAPI app; serves the React build from the same origin
+  mcp_http.py       remote MCP endpoint + the OAuth routes guarding it
+  mcp_tools.py      the MCP tools, as functions taking a user id
+
+tests/              one file per layer, runnable directly
+scripts/            CLIs: mcp_server, make_sample, check_email, benchmark, run_all
+migrations/         Alembic; 0001 initial, 0002 oauth
+web/                React app (Vite); built into the image
+```
+
+`core/` is the line worth keeping: those four modules do the actual work and
+know nothing about HTTP, sessions or tenants. Everything above them is the
+service layer. `pip install -e .` makes `app` importable everywhere, so no file
+needs a `sys.path` hack.
 
 ## The security decisions worth reading
 

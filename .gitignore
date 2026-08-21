@@ -7,3 +7,8 @@ __pycache__/
 node_modules/
 web/dist/
 .vercel/
+
+# secrets: never committed, especially not to a public repo
+.env
+.env.*
+!.env.example

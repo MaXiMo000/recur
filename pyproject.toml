@@ -1,0 +1,18 @@
+[project]
+name = "recur"
+version = "1.0.0"
+description = "Recurring-charge truth engine. Bank CSV in, subscriptions out."
+requires-python = ">=3.12"
+dynamic = ["dependencies"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# `pip install -e .` puts `app` on the path, so tests and scripts import the
+# same way the deployed process does. No sys.path juggling in any file.
+packages = ["app", "app.core"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
