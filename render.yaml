@@ -35,17 +35,14 @@ services:
       - key: RECUR_APP_PASSWORD
         generateValue: true
 
-      - key: RECUR_PUBLIC_URL
-        fromService:
-          type: web
-          name: recur
-          property: host
-
-      - key: RECUR_ALLOWED_ORIGINS
-        fromService:
-          type: web
-          name: recur
-          property: host
+      # RECUR_PUBLIC_URL and RECUR_ALLOWED_ORIGINS are deliberately absent.
+      # `fromService: property: host` looks like the right answer and is not:
+      # it resolves to the *private* network hostname with no scheme, so
+      # verification links would render as "recur/verify?token=..." -- broken,
+      # and passing every validation the app had. Render sets
+      # RENDER_EXTERNAL_URL (https://recur.onrender.com) on the service itself;
+      # config.py reads that and now refuses to boot on anything scheme-less.
+      # Set RECUR_PUBLIC_URL in the dashboard only for a custom domain.
 
       - key: RECUR_COOKIE_SAMESITE
         value: lax             # safe because the app is same-origin

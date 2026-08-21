@@ -24,16 +24,25 @@ load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env", override=False
 ENV = os.environ.get("RECUR_ENV", "development").lower()
 IS_PROD = ENV == "production"
 
+# Render sets this on every web service: the full public URL, scheme included.
+# Its blueprint `property: host` is the *private* network hostname and carries
+# no scheme, so it must not be used for either of these -- it would produce
+# verification links like "recur/verify?token=..." and pass every check.
+_RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+_DEV_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
+
 # Comma-separated list of origins allowed to call the API with credentials.
 # There is no wildcard branch: '*' and cookies are mutually exclusive anyway,
 # and a wildcard here would be an invitation.
 ALLOWED_ORIGINS = [
     o.strip() for o in os.environ.get(
-        "RECUR_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+        "RECUR_ALLOWED_ORIGINS", _RENDER_URL or _DEV_ORIGINS
     ).split(",") if o.strip()
 ]
 
-PUBLIC_URL = os.environ.get("RECUR_PUBLIC_URL", "http://localhost:5173").rstrip("/")
+PUBLIC_URL = (
+    os.environ.get("RECUR_PUBLIC_URL") or _RENDER_URL or "http://localhost:5173"
+).rstrip("/")
 
 # Cookies are httpOnly always; Secure and SameSite tighten in production.
 COOKIE_NAME = "recur_session"
@@ -92,8 +101,6 @@ LIMITS = {
 
 _PROD_REQUIREMENTS = [
     ("RECUR_APP_PASSWORD", "the unprivileged database role would use a known password"),
-    ("RECUR_ALLOWED_ORIGINS", "CORS would allow localhost, which is not your site"),
-    ("RECUR_PUBLIC_URL", "verification links would point at localhost"),
     ("RESEND_API_KEY", "verification emails would be written to the log instead of sent"),
 ]
 
@@ -108,7 +115,17 @@ def check() -> None:
         for k, why in missing:
             print(f"  {k}\n      without it, {why}", file=sys.stderr)
         raise SystemExit(1)
-    if any(o.startswith("http://") for o in ALLOWED_ORIGINS):
-        raise SystemExit("RECUR_ALLOWED_ORIGINS contains a plaintext http:// origin.")
+    # A scheme-less value is the failure this checks for, not a typo: Render's
+    # `property: host` yields a bare hostname, which every string check here
+    # would have passed while every emailed link stayed unclickable.
+    if not PUBLIC_URL.startswith("https://"):
+        raise SystemExit(
+            f"RECUR_PUBLIC_URL must be a full https:// URL, got {PUBLIC_URL!r}. "
+            "Leave it unset on Render and RENDER_EXTERNAL_URL is used."
+        )
+    if not ALLOWED_ORIGINS or not all(o.startswith("https://") for o in ALLOWED_ORIGINS):
+        raise SystemExit(
+            f"RECUR_ALLOWED_ORIGINS must be full https:// origins, got {ALLOWED_ORIGINS!r}."
+        )
     if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
         raise SystemExit("SameSite=None requires Secure cookies.")

@@ -13,8 +13,11 @@ services:
       # can't collide with a local postgres.
       - "127.0.0.1:5433:5432"
     volumes:
+      # No initdb mount. schema.sql moved into the package, and the path here
+      # went stale silently -- Docker mounts a missing file as a *directory*,
+      # so the container failed to start rather than saying the file was gone.
+      # Nothing needed it: tests call db.apply_schema(), production runs Alembic.
       - pgdata:/var/lib/postgresql/data
-      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U recur"]
       interval: 3s
