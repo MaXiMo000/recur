@@ -161,6 +161,56 @@ CREATE TABLE IF NOT EXISTS auth_attempt (
 );
 CREATE INDEX IF NOT EXISTS idx_auth_attempt ON auth_attempt (key, kind, at DESC);
 
+
+-- ----------------------------------------------------------------- oauth --
+--
+-- These live here as well as in migration 0002 on purpose. schema.sql is the
+-- *current* schema, used to bootstrap an empty database; migrations move an
+-- existing one forward. Keeping oauth only in 0002 meant a fresh database --
+-- a CI runner, a new deploy -- came up without these tables and crashed on
+-- startup, which is what CI caught on its first run.
+
+CREATE TABLE IF NOT EXISTS oauth_client (
+    client_id     TEXT PRIMARY KEY,
+    client_name   TEXT NOT NULL,
+    redirect_uris TEXT[] NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Public clients only: an MCP client is a desktop app and cannot keep a
+-- secret, so there is no client_secret to leak. PKCE binds the code instead,
+-- and S256 is enforced by the CHECK rather than by convention.
+CREATE TABLE IF NOT EXISTS oauth_code (
+    code_hash             TEXT PRIMARY KEY,
+    client_id             TEXT NOT NULL
+                          REFERENCES oauth_client(client_id) ON DELETE CASCADE,
+    user_id               BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    redirect_uri          TEXT NOT NULL,
+    code_challenge        TEXT NOT NULL,
+    code_challenge_method TEXT NOT NULL CHECK (code_challenge_method = 'S256'),
+    scope                 TEXT NOT NULL,
+    resource              TEXT,
+    expires_at            TIMESTAMPTZ NOT NULL
+);
+
+-- Tokens carry an audience: one minted here must not be replayable against a
+-- different server. That is the confused-deputy problem the MCP auth spec
+-- exists to close.
+CREATE TABLE IF NOT EXISTS oauth_token (
+    token_hash   TEXT PRIMARY KEY,
+    client_id    TEXT NOT NULL,
+    user_id      BIGINT NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+    scope        TEXT NOT NULL,
+    audience     TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    last_used_at TIMESTAMPTZ,
+    revoked_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_token_user
+    ON oauth_token (user_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_oauth_code_expiry ON oauth_code (expires_at);
+
 -- ------------------------------------------------------------------- RLS --
 --
 -- The application does NOT connect as the role that owns these tables.
