@@ -92,6 +92,43 @@ brute-force mid-attempt.
 fails at startup — before migrations — listing each missing variable and what
 goes wrong without it.
 
+## Tier 3 (embeddings) was built, measured, and removed
+
+The merchant resolution ladder stops at a real ceiling: `AWS` and `AMAZON WEB
+SERVICES` share no characters, so no string metric can connect them. The plan
+called for a pgvector tier to close it. That tier was built — extension, table
+with RLS, migration, a 30 MB local static embedding model, a semantic step in
+the ladder — and then measured before being trusted:
+
+```
+TRUE   0.348  AWS          ~ AMAZON WEB SERVICES
+TRUE   0.379  MSFT         ~ MICROSOFT
+TRUE   0.451  GOOG         ~ GOOGLE            (tier 2 already catches this)
+TRUE   0.049  AMZN         ~ AMAZON            essentially unrelated
+FALSE  0.589  AMAZON PRIME ~ AMAZON WEB SERVICES
+FALSE  0.368  PHILZ COFFEE ~ BLUE BOTTLE COFFEE
+
+best true 0.451   worst false 0.589   ->  NOT SEPARABLE
+```
+
+No threshold works, and the model's most confident answer is a **wrong merge**
+of two different Amazon merchants. An earlier reading of 0.784 for the AWS pair
+turned out to be the shared literal tokens `AWS AMAZON` in both strings rather
+than semantics — and tier 2 catches that pair anyway, as `borderline`. The case
+used to justify the tier never needed it.
+
+This is structural rather than a matter of model size. Static embeddings average
+token vectors, so `AWS` has no learned relationship to the *phrase* it
+abbreviates. Resolving an abbreviation is a knowledge lookup, not a
+distributional-similarity problem — the wrong tool, not a badly tuned one.
+
+So it was removed rather than shipped disabled: a dependency, a table and a
+migration, in exchange for zero true positives among the cases tier 2 misses and
+one new class of false positive. What already handles it is the review queue —
+asked once, written back as an alias, never asked again. A language model would
+genuinely resolve these, since it is knowledge rather than similarity; that tier
+goes in when something appears that a model could resolve and the queue cannot.
+
 ## Remote MCP
 
 `/mcp`, behind OAuth 2.1. 41% of public MCP servers have no authentication and
