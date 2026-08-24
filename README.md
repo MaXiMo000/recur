@@ -22,7 +22,7 @@ data stays on your machine. This system has nowhere to put a bank password.
 test_scrub    20 descriptors, 12 amounts    test_pipeline  16 checks
 test_resolve   9 checks                     test_api       28 checks
 test_detect   20 checks                     test_mcp       13 checks
-test_tenancy   9 isolation checks           test_oauth     26 checks
+test_tenancy  18 isolation checks           test_oauth     26 checks
 test_auth     18 checks
 ```
 

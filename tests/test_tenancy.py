@@ -5,7 +5,17 @@ worth nothing if one user can read another's bank transactions.
 
 These are deliberately *adversarial*: they don't check that a well-behaved query
 is scoped, they check that a deliberately unscoped one -- no WHERE, an explicit
-foreign id, a forged setting -- still returns nothing.
+foreign id -- still returns nothing.
+
+What RLS here does NOT defend against, measured rather than assumed: a
+connection that can run arbitrary SQL as the app role can call set_config and
+re-point `recur.user_id` at another tenant. That is pinned by
+`check_forged_setting_is_a_known_limit` below so the boundary stays written
+down instead of imagined. The controls that make it moot are the ones asserted
+here -- tenant() refuses anything that is not a positive int, and every caller
+parameterizes -- plus the role attributes and FORCE ROW LEVEL SECURITY that
+schema.sql warns can be silently inert while pg_class still reports
+relrowsecurity = true.
 """
 
 import psycopg
@@ -13,9 +23,19 @@ import psycopg
 from app import db
 
 FAILURES = []
+CHECKS = [0]
+
+# The seven tables RLS is armed on in schema.sql. Listed here on purpose: if a
+# table is added there and not here, the coverage gap is visible rather than
+# implicit.
+TENANT_TABLES = (
+    "account", "merchant", "merchant_alias", "raw_transaction",
+    "resolution_queue", "subscription", "price_change",
+)
 
 
 def check(label, got, expected):
+    CHECKS[0] += 1
     if got != expected:
         FAILURES.append(f"  {label}\n    expected {expected!r}\n    got      {got!r}")
 
@@ -136,6 +156,73 @@ def main() -> None:
             n = conn.execute("SELECT count(*) FROM raw_transaction").fetchone()[0]
         check("deleting a user erases their transactions", n, 0)
 
+        # --- the controls themselves, not just their effects -----------------
+        # schema.sql warns that connecting as a privileged user leaves every
+        # policy inert "while pg_class still cheerfully reports
+        # relrowsecurity = true". That is a configuration failure no isolation
+        # test above would name -- they would just start failing, mysteriously.
+        # These assert the controls are genuinely in force.
+
+        with db.tenant(alice) as conn:
+            role, is_super, bypasses = conn.execute(
+                "SELECT current_user,"
+                " (SELECT usesuper FROM pg_user WHERE usename = current_user),"
+                " (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user)"
+            ).fetchone()
+            owner = conn.execute(
+                "SELECT pg_get_userbyid(relowner) FROM pg_class "
+                "WHERE relname = 'raw_transaction'").fetchone()[0]
+        check("the app connects as the unprivileged role", role, db.APP_ROLE)
+        check("which is not a superuser -- nothing binds a superuser", is_super, False)
+        check("and cannot bypass RLS", bypasses, False)
+        check("and does not own the tables, which FORCE would otherwise have to catch",
+              owner != db.APP_ROLE, True)
+
+        with db.admin() as conn:
+            armed = dict(conn.execute(
+                "SELECT relname, relrowsecurity AND relforcerowsecurity "
+                "FROM pg_class WHERE relname = ANY(%s)", (list(TENANT_TABLES),)
+            ).fetchall())
+            policed = {r[0] for r in conn.execute(
+                "SELECT tablename FROM pg_policies "
+                "WHERE policyname = 'tenant_isolation' AND tablename = ANY(%s)",
+                (list(TENANT_TABLES),)).fetchall()}
+        check("every tenant table has RLS enabled AND forced",
+              sorted(t for t, ok in armed.items() if ok), sorted(TENANT_TABLES))
+        check("every tenant table carries the isolation policy",
+              sorted(policed), sorted(TENANT_TABLES))
+
+        # --- the trust boundary that actually holds the line -----------------
+        # RLS keys on a session setting the app role is allowed to write, so
+        # the real boundary is that no attacker-controlled value reaches it.
+        rejected = []
+        for bad in ("1 OR 1=1", f"{bob}", 0, -1, None, 1.5, True):
+            try:
+                with db.tenant(bad):
+                    pass
+            except ValueError:
+                rejected.append(bad)
+            except Exception:  # noqa: BLE001 -- any other failure is still not a pass
+                pass
+        check("tenant() refuses everything that is not a positive int",
+              rejected, ["1 OR 1=1", f"{bob}", 0, -1, None, 1.5, True])
+
+        # --- a known limit, pinned so it stays known --------------------------
+        # If someone later makes the setting transaction-scoped or moves the
+        # tenant key somewhere the app role cannot write, this check fails and
+        # forces the docstring above to be rewritten. That is the point.
+        # A third user with no data of their own, so this does not depend on
+        # whether an earlier check has erased someone.
+        mallory = make_user("mallory@example.com")
+        with db.tenant(mallory) as conn:
+            own = conn.execute("SELECT count(*) FROM raw_transaction").fetchone()[0]
+            conn.execute("SELECT set_config('recur.user_id', %s, false)", (str(alice),))
+            pivoted = conn.execute(
+                "SELECT count(*) FROM raw_transaction").fetchone()[0]
+        check("a tenant with no data of their own sees none", own, 0)
+        check("arbitrary SQL as the app role can still re-point the tenant key "
+              "(documented limit, not a defence)", pivoted > 0, True)
+
         with db.admin() as conn:
             conn.execute("DELETE FROM app_user WHERE email LIKE '%@example.com'")
             conn.commit()
@@ -146,7 +233,13 @@ def main() -> None:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print("ok  (9 isolation checks)")
+    # A floor, not a target. The count was hardcoded here, so deleting a check
+    # left the suite printing the old number and looking unchanged.
+    FLOOR = 18
+    if CHECKS[0] < FLOOR:
+        raise SystemExit(f"isolation checks shrank: {CHECKS[0]} < {FLOOR}. "
+                         "An edit probably deleted one -- check git diff.")
+    print(f"ok  ({CHECKS[0]} isolation checks)")
 
 
 if __name__ == "__main__":

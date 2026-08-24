@@ -113,7 +113,11 @@ def tenant(user_id: int):
     every subsequent statement invisible to itself. The pool's reset callback is
     what makes session scope safe.
     """
-    if not isinstance(user_id, int) or user_id <= 0:
+    # bool is a subclass of int, so isinstance(True, int) is True. Without
+    # this, tenant(True) sets recur.user_id to 'True' and every policy then
+    # errors on the ::BIGINT cast -- and a policy that errors is not a policy
+    # that denies, it is an outage.
+    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
         raise ValueError("tenant() needs a real user id")
     with _get().connection() as conn:
         conn.execute("SELECT set_config('recur.user_id', %s, false)", (str(user_id),))
