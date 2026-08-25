@@ -8,12 +8,17 @@ are the cases that break naive gap arithmetic.
 from datetime import date, timedelta
 
 from app.core.detect import (coefficient_of_variation, fit_cadence, next_occurrence,
-                    price_changes, segmented_cv, status_of)
+                    price_changes, segmented_cv, status_of, duplicate_groups
+)
 
 FAILURES = []
 
 
+CHECKS = [0]
+
+
 def check(label, got, expected):
+    CHECKS[0] += 1
     if got != expected:
         FAILURES.append(f"  {label}\n    expected {expected!r}\n    got      {got!r}")
 
@@ -110,11 +115,66 @@ def main() -> None:
     check("four months silent is cancelled",
           status_of(date(2026, 3, 1), date(2026, 8, 20), 30.44), "cancelled")
 
+    # --- duplicate detection -------------------------------------------------
+    def sub(merchant, account, annual, cadence="monthly", status="active",
+            currency="USD", amount=None):
+        return {"id": abs(hash((merchant, account))) % 10000, "merchant": merchant,
+                "account": account, "cadence": cadence, "status": status,
+                "currency": currency, "last_seen": date(2026, 1, 1),
+                "current_amount_cents": amount if amount is not None else annual // 12,
+                "annual_cents": annual}
+
+    one_each = [sub("NETFLIX", "amex", 19188), sub("SPOTIFY", "amex", 11988)]
+    check("one subscription per merchant is not a duplicate",
+          duplicate_groups(one_each), [])
+
+    two_cards = [sub("NETFLIX", "amex", 19188), sub("NETFLIX", "chase", 19188)]
+    g = duplicate_groups(two_cards)
+    check("same merchant on two cards is flagged", len(g), 1)
+    check("both charges are reported", g[0]["count"], 2)
+    check("the overlap is what the cheaper one would save",
+          g[0]["annual_cents_redundant"], 19188)
+    check("and the combined figure is both", g[0]["annual_cents_total"], 38376)
+
+    # A cancelled row costs nothing, so it cannot make a duplicate.
+    with_cancelled = [sub("NETFLIX", "amex", 19188),
+                      sub("NETFLIX", "chase", 19188, status="cancelled")]
+    check("a cancelled second charge is not a duplicate",
+          duplicate_groups(with_cancelled), [])
+
+    # Monthly plus annual for one merchant is the classic un-cancelled upgrade.
+    mixed = [sub("ADOBE", "amex", 63588, cadence="monthly"),
+             sub("ADOBE", "chase", 59988, cadence="annual")]
+    check("two cadences for one merchant is flagged as mixed",
+          duplicate_groups(mixed)[0]["mixed_cadence"], True)
+    check("two of the same cadence is not",
+          duplicate_groups(two_cards)[0]["mixed_cadence"], False)
+
+    # money.py's rule: never add two currencies into one number.
+    split_currency = [sub("NETFLIX", "amex", 19188, currency="USD"),
+                      sub("NETFLIX", "jp", 144000, currency="JPY")]
+    check("different currencies are not combined into one total",
+          duplicate_groups(split_currency), [])
+
+    # Most money at stake first, so the expensive overlap is not buried.
+    ranked = duplicate_groups(
+        [sub("CHEAP", "a", 1200), sub("CHEAP", "b", 1200),
+         sub("PRICEY", "a", 120000), sub("PRICEY", "b", 120000)])
+    check("groups are ordered by what the overlap costs",
+          [x["merchant"] for x in ranked], ["PRICEY", "CHEAP"])
+
     if FAILURES:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print("ok  (20 checks)")
+    # A floor, not a target. test_auth and test_pipeline each printed a
+    # hardcoded count two higher than they actually ran, so checks had been
+    # deleted at some point and the number never moved.
+    FLOOR = 30
+    if CHECKS[0] < FLOOR:
+        raise SystemExit(f"checks shrank: {CHECKS[0]} < {FLOOR} -- check git diff.")
+
+    print(f"ok  ({CHECKS[0]} checks)")
 
 
 if __name__ == "__main__":

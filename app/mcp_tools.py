@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app import db
+from app.core import detect
 from app.core.detect import CADENCES, USAGE_CV
 
 PERIOD = dict((c[0], c[1]) for c in CADENCES)
@@ -133,6 +134,34 @@ def find_forgotten(uid: int) -> list[dict]:
     return out
 
 
+def find_duplicates(uid: int) -> list[dict]:
+    """Merchants with more than one active subscription -- usually one card
+    replacing another without the old mandate being cancelled."""
+    rows = _rows(uid,
+        "SELECT s.id, m.canonical_name AS merchant, a.label AS account,"
+        "       s.cadence, s.current_amount_cents, s.currency, s.status, s.last_seen "
+        "FROM subscription s "
+        "JOIN merchant m ON m.id = s.merchant_id "
+        "JOIN account a ON a.id = s.account_id "
+        "WHERE s.status = 'active'")
+    for r in rows:
+        r["annual_cents"] = round(
+            r["current_amount_cents"] * 365.25 / PERIOD[r["cadence"]])
+    out = []
+    for g in detect.duplicate_groups(rows):
+        out.append({
+            "merchant": g["merchant"],
+            "currency": g["currency"],
+            "charged_on": [x["account"] for x in g["subscriptions"]],
+            "mixed_cadence": g["mixed_cadence"],
+            "annual_total": round(g["annual_cents_total"] / 100, 2),
+            "annual_redundant_if_duplicate": round(g["annual_cents_redundant"] / 100, 2),
+            "note": "Possible duplicate, not confirmed -- a family plan split "
+                    "across two cards looks the same from the data.",
+        })
+    return out
+
+
 def data_quality(uid: int) -> dict:
     stats = _rows(uid,
         "SELECT count(*) FILTER (WHERE merchant_id IS NOT NULL) AS resolved,"
@@ -179,6 +208,14 @@ TOOLS = {
         find_forgotten,
         "Subscriptions most likely to be forgotten: annual renewals coming up, and "
         "anything lapsed rather than cancelled outright.",
+        {}, []),
+    "find_duplicates": (
+        find_duplicates,
+        "Merchants billing more than one active subscription at once, usually a "
+        "replaced card whose old mandate was never cancelled. Reports what each "
+        "account is charged and what the overlap costs per year. Possible "
+        "duplicates, not confirmed: a family plan paid from two cards looks "
+        "identical from the data.",
         {}, []),
     "data_quality": (
         data_quality,

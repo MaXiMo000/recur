@@ -248,6 +248,62 @@ def price_changes(points: list[tuple[date, int]]) -> list[tuple[date, int, int]]
     return out
 
 
+def duplicate_groups(subs: list[dict]) -> list[dict]:
+    """Active subscriptions billing the same merchant on more than one account.
+
+    `subscription` is UNIQUE (user_id, merchant_id, account_id), so one merchant
+    can hold a row per card. That is exactly what happens when a card is
+    replaced and the old mandate is never cancelled: two live charges for one
+    service, on two statements, which is precisely the thing nobody notices by
+    reading either statement alone.
+
+    Reported as *possible*, never asserted. A family plan paid from two cards,
+    or a personal and a business account with the same vendor, looks identical
+    from the data and is not a mistake. The evidence is returned so a human can
+    tell which it is.
+
+    Only `active` rows count -- a cancelled duplicate is not costing anything.
+    Totals stay inside one currency, for the reason in money.py: adding USD to
+    JPY produces a number that is wrong rather than approximate. A merchant
+    billing in two currencies is reported, with no combined figure.
+    """
+    by_key: dict[tuple, list[dict]] = {}
+    for r in subs:
+        if r.get("status") != "active":
+            continue
+        by_key.setdefault((r["merchant"], r.get("currency", "USD")), []).append(r)
+
+    groups = []
+    for (merchant, currency), rows in sorted(by_key.items()):
+        if len(rows) < 2:
+            continue
+        rows = sorted(rows, key=lambda r: -r["annual_cents"])
+        total = sum(r["annual_cents"] for r in rows)
+        # The cheapest is the plausible keeper, so what is plausibly wasted is
+        # everything above it. Stated as "if these are duplicates", not as fact.
+        redundant = total - min(r["annual_cents"] for r in rows)
+        groups.append({
+            "merchant": merchant,
+            "currency": currency,
+            "count": len(rows),
+            # Two cadences for one merchant is the strongest signal: switching
+            # monthly to annual without cancelling the monthly looks like this.
+            "mixed_cadence": len({r["cadence"] for r in rows}) > 1,
+            "annual_cents_total": total,
+            "annual_cents_redundant": redundant,
+            "subscriptions": [
+                {"id": r.get("id"), "account": r.get("account"),
+                 "cadence": r["cadence"],
+                 "current_amount_cents": r["current_amount_cents"],
+                 "annual_cents": r["annual_cents"],
+                 "last_seen": str(r["last_seen"])}
+                for r in rows
+            ],
+        })
+    # Most money at stake first.
+    return sorted(groups, key=lambda g: -g["annual_cents_redundant"])
+
+
 def status_of(last_seen: date, as_of: date, period: float) -> str:
     """`as_of` is the newest transaction in the data, not today -- a statement
     exported in March shouldn't mark everything cancelled in June."""

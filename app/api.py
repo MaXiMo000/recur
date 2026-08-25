@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
+from app.core import detect
 from app import auth
 from app import config
 from app import db
@@ -414,6 +415,30 @@ def subscriptions(limit: int = Query(MAX_PAGE, ge=1, le=MAX_PAGE),
         r["usage_based"] = float(r["amount_cv"]) > USAGE_CV
         r["minor_digits"] = money.minor_units(r["currency"] or "USD")
     return rows
+
+
+@app.get("/api/duplicates")
+def duplicates(uid: int = Depends(current_user)) -> list[dict]:
+    """Merchants billing more than one active subscription.
+
+    `subscription` is unique per (user, merchant, account), so this is what a
+    replaced card leaves behind when the old mandate is never cancelled: two
+    live charges for one service, sitting on two different statements.
+    """
+    rows = _rows(uid,
+        "SELECT s.id, m.canonical_name AS merchant, a.label AS account,"
+        "       s.cadence, s.current_amount_cents, s.currency, s.status, s.last_seen "
+        "FROM subscription s "
+        "JOIN merchant m ON m.id = s.merchant_id "
+        "JOIN account a ON a.id = s.account_id "
+        "WHERE s.status = 'active'")
+    for r in rows:
+        r["annual_cents"] = round(
+            r["current_amount_cents"] * 365.25 / PERIOD[r["cadence"]])
+    groups = detect.duplicate_groups(rows)
+    for g in groups:
+        g["minor_digits"] = money.minor_units(g["currency"] or "USD")
+    return groups
 
 
 @app.get("/api/upcoming")

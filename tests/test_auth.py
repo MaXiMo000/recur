@@ -15,7 +15,11 @@ FAILURES = []
 PW = "correct-horse-battery-staple"
 
 
+CHECKS = [0]
+
+
 def check(label, got, expected):
+    CHECKS[0] += 1
     if got != expected:
         FAILURES.append(f"  {label}\n    expected {expected!r}\n    got      {got!r}")
 
@@ -134,7 +138,14 @@ def main() -> None:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print("ok  (18 auth checks)")
+    # A floor, not a target. test_auth and test_pipeline each printed a
+    # hardcoded count two higher than they actually ran, so checks had been
+    # deleted at some point and the number never moved.
+    FLOOR = 16
+    if CHECKS[0] < FLOOR:
+        raise SystemExit(f"checks shrank: {CHECKS[0]} < {FLOOR} -- check git diff.")
+
+    print(f"ok  ({CHECKS[0]} auth checks)")
 
 
 if __name__ == "__main__":

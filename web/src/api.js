@@ -68,6 +68,7 @@ export const api = {
   subscriptions: () => request("/api/subscriptions"),
   upcoming: (days = 30) => request(`/api/upcoming?days=${days}`),
   increases: () => request("/api/increases"),
+  duplicates: () => request("/api/duplicates"),
   history: (id) => request(`/api/history/${id}`),
 
   reviewQueue: () => request("/api/review-queue"),

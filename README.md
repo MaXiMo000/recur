@@ -20,10 +20,10 @@ data stays on your machine. This system has nowhere to put a bank password.
 
 ```
 test_scrub    20 descriptors, 12 amounts    test_pipeline  16 checks
-test_resolve   9 checks                     test_api       28 checks
-test_detect   20 checks                     test_mcp       13 checks
-test_tenancy  18 isolation checks           test_oauth     26 checks
-test_auth     18 checks
+test_resolve   9 checks                     test_api       38 checks
+test_detect   30 checks                     test_mcp       13 checks
+test_tenancy  18 isolation checks           test_oauth     28 checks
+test_auth     16 checks
 ```
 
 Run everything: `for t in tests/test_*.py; do .venv/bin/python $t; done`
@@ -91,6 +91,24 @@ brute-force mid-attempt.
 **Production refuses to boot without its secrets.** `RECUR_ENV=production`
 fails at startup — before migrations — listing each missing variable and what
 goes wrong without it.
+
+## Paying the same merchant twice
+
+`subscription` is unique per (user, merchant, **account**), so one merchant can
+hold a live row per card. That is exactly what a replaced card leaves behind
+when the old mandate is never cancelled: two charges for one service, sitting
+on two different statements, which is the one arrangement you cannot spot by
+reading either statement on its own.
+
+`/api/duplicates`, the `find_duplicates` MCP tool and a dashboard card report
+it, ranked by what the overlap costs per year. Two different cadences for one
+merchant is called out separately — switching monthly to annual and never
+cancelling the monthly looks like that.
+
+Reported as *possible*, never asserted. A family plan paid from two cards, or a
+personal and a business account with the same vendor, is identical in the data
+and is not a mistake; the accounts and amounts are shown so a human can tell
+which it is. Totals stay inside one currency for the reason below.
 
 ## Money is per currency, never one number
 

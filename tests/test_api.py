@@ -25,6 +25,18 @@ CSV_A = b"""Date,Description,Amount
 01/03/2026,NETFLIX.COM,-17.99
 02/03/2026,NETFLIX.COM,-17.99
 """
+# Alice's second card, billing the same merchant as CSV_A. This is what a
+# replaced card looks like when the old mandate was never cancelled.
+# Dates are MM/DD here, matching CSV_A -- the reader defaults to month-first,
+# and a DD/MM fixture parses to month 14 and is dropped as unusable.
+CSV_A2 = b"""Date,Description,Amount
+09/14/2025,NETFLIX.COM,-15.49
+10/14/2025,NETFLIX.COM,-15.49
+11/14/2025,NETFLIX.COM,-15.49
+12/14/2025,NETFLIX.COM,-15.49
+01/14/2026,NETFLIX.COM,-15.49
+02/14/2026,NETFLIX.COM,-15.49
+"""
 CSV_B = b"""Date,Description,Amount
 09/07/2025,BOB CONFIDENTIAL LLC,-99.00
 10/07/2025,BOB CONFIDENTIAL LLC,-99.00
@@ -32,7 +44,11 @@ CSV_B = b"""Date,Description,Amount
 """
 
 
+CHECKS = [0]
+
+
 def check(label, got, expected):
+    CHECKS[0] += 1
     if got != expected:
         FAILURES.append(f"  {label}\n    expected {expected!r}\n    got      {got!r}")
 
@@ -59,7 +75,7 @@ def main() -> None:
         # --- everything is closed to an anonymous caller
         for path in ("/api/summary", "/api/subscriptions", "/api/upcoming",
                      "/api/increases", "/api/review-queue", "/api/me",
-                     "/api/export", "/api/history/1"):
+                     "/api/export", "/api/history/1", "/api/duplicates"):
             check(f"anonymous {path} is 401", anon.get(path).status_code, 401)
         check("anonymous upload is 401",
               anon.post("/api/upload",
@@ -118,6 +134,24 @@ def main() -> None:
               [(i["old_amount_cents"], i["new_amount_cents"]) for i in inc],
               [(1549, 1799)])
 
+        # --- the same merchant on two cards is surfaced, and scoped per tenant
+        # One card, so nothing to report yet.
+        check("one card means no duplicates", a.get("/api/duplicates").json(), [])
+
+        a.post("/api/upload", files={"file": ("a2.csv", io.BytesIO(CSV_A2), "text/csv")},
+               data={"account": "alice-amex"})
+        dupes = a.get("/api/duplicates").json()
+        check("the same merchant on a second card is flagged", len(dupes), 1)
+        check("and it names the merchant", dupes[0]["merchant"].upper().startswith("NETFLIX"), True)
+        check("both cards are listed", dupes[0]["count"], 2)
+        check("the accounts are named so a human can tell which to cancel",
+              sorted(x["account"] for x in dupes[0]["subscriptions"]),
+              ["alice-amex", "alice-card"])
+        check("the overlap has a cost attached",
+              dupes[0]["annual_cents_redundant"] > 0, True)
+        # Bob uploaded his own statement; duplicates must not cross tenants.
+        check("bob sees none of alice's duplicates", b.get("/api/duplicates").json(), [])
+
         # --- rubbish upload gives a usable message, not a stack trace
         r = a.post("/api/upload",
                    files={"file": ("x.csv", io.BytesIO(b"\x00\x01binary"), "text/csv")})
@@ -169,7 +203,14 @@ def main() -> None:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
         raise SystemExit(1)
-    print("ok  (28 api checks)")
+    # A floor, not a target. test_auth and test_pipeline each printed a
+    # hardcoded count two higher than they actually ran, so checks had been
+    # deleted at some point and the number never moved.
+    FLOOR = 38
+    if CHECKS[0] < FLOOR:
+        raise SystemExit(f"checks shrank: {CHECKS[0]} < {FLOOR} -- check git diff.")
+
+    print(f"ok  ({CHECKS[0]} api checks)")
 
 
 if __name__ == "__main__":

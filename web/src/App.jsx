@@ -160,6 +160,7 @@ function Dashboard({ me, onSignedOut }) {
   const subs = useApi(() => api.subscriptions(), [], reload);
   const upcoming = useApi(() => api.upcoming(30), [], reload);
   const increases = useApi(() => api.increases(), [], reload);
+  const duplicates = useApi(() => api.duplicates(), [], reload);
   const queue = useApi(() => api.reviewQueue(), [], reload);
 
   const s = summary.data;
@@ -247,6 +248,37 @@ function Dashboard({ me, onSignedOut }) {
               ) : <div className="empty">Nothing due in the next 30 days.</div>}
             </div>
           </div>
+
+          {/* Only rendered when there is something to say. An empty "no
+              duplicates" card is furniture; its absence is the good news. */}
+          {duplicates.data?.length ? (
+            <>
+              <h2>Charged twice</h2>
+              <div className="card">
+                <div className="rows">
+                  {duplicates.data.map((g, i) => (
+                    <div className="row" key={i}>
+                      <span className="grow">
+                        {g.merchant}
+                        <span className="muted">
+                          {" "}on {g.subscriptions.map((s) => s.account).join(" and ")}
+                          {g.mixed_cadence ? " — different cadences" : ""}
+                        </span>
+                      </span>
+                      <span className="muted">
+                        {money(g.annual_cents_redundant, g.currency)}/yr if duplicated
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted">
+                  One merchant, more than one live charge — usually a replaced card
+                  whose old mandate was never cancelled. Worth checking rather than
+                  assuming: a family plan split across two cards looks the same here.
+                </p>
+              </div>
+            </>
+          ) : null}
 
           <h2>Price changes</h2>
           <div className="card">
