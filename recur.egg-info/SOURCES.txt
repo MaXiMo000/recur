@@ -1,3 +1,4 @@
+LICENSE
 README.md
 pyproject.toml
 requirements.txt
@@ -14,6 +15,7 @@ app/pipeline.py
 app/core/__init__.py
 app/core/detect.py
 app/core/ingest.py
+app/core/money.py
 app/core/resolve.py
 app/core/scrub.py
 recur.egg-info/PKG-INFO

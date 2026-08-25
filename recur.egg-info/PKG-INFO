@@ -2,7 +2,9 @@ Metadata-Version: 2.4
 Name: recur
 Version: 1.0.0
 Summary: Recurring-charge truth engine. Bank CSV in, subscriptions out.
+License-Expression: MIT
 Requires-Python: >=3.12
+License-File: LICENSE
 Requires-Dist: psycopg[binary]>=3.2
 Requires-Dist: rapidfuzz>=3.9
 Requires-Dist: fastapi>=0.115
@@ -15,3 +17,5 @@ Requires-Dist: email-validator>=2.0
 Requires-Dist: python-multipart>=0.0.9
 Requires-Dist: alembic>=1.14
 Requires-Dist: python-dotenv>=1.0
+Requires-Dist: sentry-sdk[fastapi]>=2.0
+Dynamic: license-file

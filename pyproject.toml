@@ -3,10 +3,14 @@ name = "recur"
 version = "1.0.0"
 description = "Recurring-charge truth engine. Bank CSV in, subscriptions out."
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 dynamic = ["dependencies"]
 
 [build-system]
-requires = ["setuptools>=68"]
+# 77 is the floor for PEP 639 (`license = "MIT"` as an SPDX expression).
+# On 68 a clean build environment would reject it.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
