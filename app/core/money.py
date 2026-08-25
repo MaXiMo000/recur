@@ -28,6 +28,27 @@ ZERO_DECIMAL = frozenset({
 THREE_DECIMAL = frozenset({"BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"})
 
 
+def normalise(currency: str) -> str:
+    """An ISO 4217 alphabetic code, or a refusal.
+
+    Three ASCII letters is not pedantry. The browser formats every figure on
+    the dashboard through `Intl.NumberFormat`, which raises `RangeError` on a
+    code of any other shape -- so a two-letter code accepted here is a stored
+    value that throws *during render*, from then on, taking the whole screen
+    rather than one number. The upload form's currency box is free text; `Z`
+    is one keystroke away, and the only way back out was deleting the account.
+
+    The boundary is the only place this check is worth anything. Defending in
+    the renderer would leave the bad value in the database, still wrong for
+    every other reader, and still one `to_minor` away from a hundredfold error.
+    """
+    c = (currency or "USD").strip().upper()
+    if len(c) != 3 or not (c.isascii() and c.isalpha()):
+        raise ValueError(
+            f"{currency!r} is not a three-letter currency code, like USD or JPY.")
+    return c
+
+
 def minor_units(currency: str) -> int:
     """How many digits after the decimal point this currency actually has."""
     c = (currency or "USD").upper()

@@ -7,7 +7,6 @@ import { api } from "./api";
  * Leaving it unanswerable would leave every total on the dashboard permanently
  * understated, with nothing on screen explaining why. */
 
-const money = (c) => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
 
 export function Upload({ onLoaded }) {
   const [file, setFile] = useState(null);
@@ -54,7 +53,14 @@ export function Upload({ onLoaded }) {
         </label>
         <label className="field">
           <span>Currency</span>
+          {/* Three letters, enforced by the browser as well as the server.
+              Anything else is stored and then thrown at Intl.NumberFormat on
+              every render of the dashboard, which raises rather than
+              formatting -- one keystroke here used to take the whole screen
+              down until the account was deleted. */}
           <input value={currency} maxLength={3} style={{ width: 90 }}
+                 pattern="[A-Za-z]{3}" required
+                 title="A three-letter currency code, like USD or JPY"
                  onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
         </label>
         <label className="check">
@@ -201,4 +207,3 @@ export function AccountPanel({ me, onSignedOut }) {
   );
 }
 
-export { money };

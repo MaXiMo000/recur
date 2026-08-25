@@ -134,6 +134,28 @@ separator is a *thousands group* in dollars but a *real fraction* in dinars, and
 in yen `12.00` is an exporter adding decimals to a whole number rather than
 1,200 of anything. All ten cases are in `tests/test_scrub.py`.
 
+**The fix originally stopped at the API.** Both rules were enforced in the
+database and in every endpoint, and then undone one layer above by the client
+that draws the numbers. `money()` in the React app took the minor-unit count as
+a *third argument defaulting to 2* — and a default is what makes the wrong
+thing the easy thing. Eight of its twelve call sites omitted it, so a ¥1,200
+charge drew as ¥12.00; `/api/increases` selected no currency column at all, so
+a yen price rise came out with a dollar sign; and the "next 30 days" total
+added the currencies back together and printed the sum as dollars, which is
+precisely what the section above says the API stopped doing.
+
+It now asks `Intl.NumberFormat` for the count, which knows it per currency and
+cannot be forgotten, and every total on the screen is grouped the way the API
+groups it. The bar next to each subscription is scaled against the largest row
+*in its own currency* too — nothing here converts, so nothing here may compare.
+
+**A currency code is validated, not truncated.** Upload took
+`currency.upper()[:3]` from a free-text box, so `Z` was stored happily — and
+`Intl.NumberFormat` raises `RangeError` on a code that is not three letters, so
+one keystroke took down every render of the dashboard until the account was
+deleted. Three ASCII letters or a 400, checked at the boundary where the value
+enters.
+
 ## Tier 3 (embeddings) was built, measured, and removed
 
 The merchant resolution ladder stops at a real ceiling: `AWS` and `AMAZON WEB
