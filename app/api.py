@@ -335,8 +335,11 @@ async def upload(request: Request, file: UploadFile = File(...),
         raise HTTPException(413, "That file is too large.")
     raw = await file.read(pipeline.MAX_BYTES + 1)
     try:
+        # Validated, not truncated. `[:3]` turned "US" into "US" and stored it,
+        # and a code that is not three letters raises in Intl.NumberFormat --
+        # so the next render of the dashboard threw instead of drawing.
         return pipeline.run(uid, raw, account.strip()[:64] or "card",
-                            dayfirst=dayfirst, currency=currency.upper()[:3],
+                            dayfirst=dayfirst, currency=money.normalise(currency),
                             source=(file.filename or "upload")[:120])
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -373,10 +376,14 @@ def summary(uid: int = Depends(current_user)) -> dict:
         else:
             bucket["inactive_count"] += 1
 
+    # Active only, for the same reason `duplicate_groups` counts active only: a
+    # rise on a subscription that has since stopped charging is history, not a
+    # cost. The tile says "added per year", and nothing is being added.
     for c in _rows(uid,
             "SELECT p.new_amount_cents - p.old_amount_cents AS d, s.period_days,"
             "       s.currency FROM price_change p "
-            "JOIN subscription s ON s.id = p.subscription_id"):
+            "JOIN subscription s ON s.id = p.subscription_id "
+            "WHERE s.status = 'active'"):
         cur = (c["currency"] or "USD").upper()
         if cur in by_currency:
             by_currency[cur]["price_increase_annual_minor"] += round(
@@ -453,9 +460,17 @@ def upcoming(days: int = Query(30, ge=1, le=365),
 
 @app.get("/api/increases")
 def increases(uid: int = Depends(current_user)) -> list[dict]:
+    """Every price change, with the currency it happened in.
+
+    The currency was not selected at all, so the client had nothing to format
+    with and fell back to dollars: a ¥1,200 rise was drawn as $12.00, wrong in
+    both the symbol and the magnitude. `status` comes back too, because a rise
+    on a subscription that has stopped charging is a fact about the past and
+    must not be presented as money still going out.
+    """
     rows = _rows(uid,
         "SELECT m.canonical_name AS merchant, p.effective_date, p.old_amount_cents,"
-        "       p.new_amount_cents, p.pct_change, s.period_days "
+        "       p.new_amount_cents, p.pct_change, s.period_days, s.currency, s.status "
         "FROM price_change p JOIN subscription s ON s.id = p.subscription_id "
         "JOIN merchant m ON m.id = s.merchant_id ORDER BY p.effective_date DESC")
     for r in rows:

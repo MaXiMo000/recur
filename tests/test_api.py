@@ -44,6 +44,16 @@ CSV_B = b"""Date,Description,Amount
 """
 
 
+CSV_JPY = b"""Date,Description,Amount
+06/05/2026,NINTENDO ONLINE TOKYO,-1200
+07/05/2026,NINTENDO ONLINE TOKYO,-1200
+08/05/2026,NINTENDO ONLINE TOKYO,-1200
+09/05/2026,NINTENDO ONLINE TOKYO,-1200
+10/05/2026,NINTENDO ONLINE TOKYO,-1200
+11/05/2026,NINTENDO ONLINE TOKYO,-1200
+"""
+
+
 CHECKS = [0]
 
 
@@ -152,6 +162,56 @@ def main() -> None:
         # Bob uploaded his own statement; duplicates must not cross tenants.
         check("bob sees none of alice's duplicates", b.get("/api/duplicates").json(), [])
 
+        # --- every price change carries the currency it happened in
+        #
+        # It did not, so the client had nothing to format with and fell back to
+        # dollars: a yen rise was drawn with a dollar sign and a hundredth of
+        # its size. `status` rides along because a rise on a subscription that
+        # has stopped charging is a fact about the past, not money going out.
+        inc = a.get("/api/increases").json()
+        check("a price change names its currency",
+              all(i.get("currency") for i in inc), True)
+        check("and whether the subscription is still charging",
+              all(i.get("status") for i in inc), True)
+
+        # --- a currency that is not three letters is refused, not truncated
+        #
+        # `currency.upper()[:3]` stored "US" happily. Every figure on the
+        # dashboard goes through Intl.NumberFormat, which raises RangeError on
+        # a code of that shape -- so one keystroke in a free-text box took the
+        # whole screen down on every render, with no way back but deleting the
+        # account.
+        for bad in ("Z", "US", "1234", "U$D"):
+            r = a.post("/api/upload",
+                       files={"file": ("a.csv", io.BytesIO(CSV_A), "text/csv")},
+                       data={"account": "alice-card", "currency": bad})
+            check(f"currency {bad!r} is refused", r.status_code, 400)
+
+        # --- a yen statement stays yen, and stays out of the dollar total
+        r = a.post("/api/upload",
+                   files={"file": ("jp.csv", io.BytesIO(CSV_JPY), "text/csv")},
+                   data={"account": "alice-jp", "currency": "jpy"})
+        check("a yen statement uploads, lowercase code and all", r.status_code, 200)
+
+        totals = {t["currency"]: t for t in a.get("/api/summary").json()["totals"]}
+        check("yen is a total of its own", "JPY" in totals, True)
+        check("with no minor unit", totals["JPY"]["minor_digits"], 0)
+        # 1200/month is about 14,600 a year. A hundredfold error would put it
+        # near 1.46 million, which is the failure this pins.
+        check("and no hundredfold inflation",
+              14_000 < totals["JPY"]["annual_minor"] < 15_000, True)
+        check("dollars are still counted separately", "USD" in totals, True)
+
+        # --- a rise on a subscription that stopped charging is not a cost
+        #
+        # The statement now runs to November, so the February Netflix rows are
+        # long stale. The tile says "added per year"; nothing is being added.
+        statuses = {s["status"] for s in a.get("/api/subscriptions").json()
+                    if s["merchant"] == "NETFLIX"}
+        check("netflix is no longer active", statuses, {"cancelled"})
+        check("so its old price rise stops counting as money going out",
+              totals["USD"]["price_increase_annual_minor"], 0)
+
         # --- rubbish upload gives a usable message, not a stack trace
         r = a.post("/api/upload",
                    files={"file": ("x.csv", io.BytesIO(b"\x00\x01binary"), "text/csv")})
@@ -206,7 +266,7 @@ def main() -> None:
     # A floor, not a target. test_auth and test_pipeline each printed a
     # hardcoded count two higher than they actually ran, so checks had been
     # deleted at some point and the number never moved.
-    FLOOR = 38
+    FLOOR = 50
     if CHECKS[0] < FLOOR:
         raise SystemExit(f"checks shrank: {CHECKS[0]} < {FLOOR} -- check git diff.")
 

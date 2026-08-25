@@ -4,13 +4,33 @@ import { api, ApiError } from "./api";
 import { AuthScreen, TokenScreen } from "./Auth";
 import { AccountPanel, ReviewQueue, Upload } from "./Upload";
 
-/* Intl knows each currency's minor-unit count, so passing the raw integer
-   scaled by the right power of ten formats yen without a decimal point and
-   dinars with three -- rather than assuming everything is hundredths. */
-const money = (minor, currency = "USD", digits = 2) =>
-  (minor / 10 ** digits).toLocaleString(undefined,
-    { style: "currency", currency, minimumFractionDigits: digits,
-      maximumFractionDigits: digits });
+/* Intl knows each currency's minor-unit count, so the integer is scaled by
+   that currency's own power of ten -- yen without a decimal point, dinars with
+   three -- rather than assuming everything is hundredths.
+
+   Asking Intl rather than taking the count as an argument is the whole point.
+   It used to be a third parameter defaulting to 2, and a default is what makes
+   the wrong thing the easy thing: eight of the twelve call sites omitted it,
+   so ¥1,200 drew as ¥12.00 with nothing to notice. A currency's minor units
+   are a property of the currency, and the only argument that can be forgotten
+   is one that exists. */
+const money = (minor, currency = "USD") => {
+  const fmt = new Intl.NumberFormat(undefined,
+    { style: "currency", currency: (currency || "USD").toUpperCase() });
+  return fmt.format(minor / 10 ** fmt.resolvedOptions().maximumFractionDigits);
+};
+
+/* Totals, per currency, never across them: adding a dollar to a yen produces
+   a number that is wrong rather than approximate. Returned as pairs so a
+   single-currency account still renders one line and reads as it always did. */
+const totalsByCurrency = (rows, amount) => {
+  const acc = new Map();
+  for (const r of rows) {
+    const c = (r.currency || "USD").toUpperCase();
+    acc.set(c, (acc.get(c) ?? 0) + amount(r));
+  }
+  return [...acc.entries()].sort((a, b) => b[1] - a[1]);
+};
 const day = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-US",
                                                                { month: "short", day: "numeric" });
 
@@ -32,7 +52,7 @@ function useApi(fn, deps = [], reloadKey = 0) {
 /* One series, so no legend -- the heading names it. Prices hold flat and then
    jump, so the line is stepped: interpolating between them would draw a gradual
    rise that never happened. */
-function PriceHistory({ points, title }) {
+function PriceHistory({ points, title, currency }) {
   const W = 560, H = 150, P = { t: 14, r: 16, b: 22, l: 52 };
   const [hover, setHover] = useState(null);
   if (!points?.length) return null;
@@ -65,7 +85,7 @@ function PriceHistory({ points, title }) {
           <g key={i}>
             <line x1={P.l} x2={W - P.r} y1={py(v)} y2={py(v)} stroke="var(--grid)" strokeWidth="1" />
             <text x={P.l - 8} y={py(v) + 4} textAnchor="end" fontSize="10" fill="var(--text-muted)">
-              {money(v)}
+              {money(v, currency)}
             </text>
           </g>
         ))}
@@ -86,7 +106,7 @@ function PriceHistory({ points, title }) {
         </text>
       </svg>
       <figcaption className="muted" style={{ fontSize: 12, minHeight: 18 }}>
-        {h ? `${day(h.posted_date)} — ${money(h.amount_cents)}`
+        {h ? `${day(h.posted_date)} — ${money(h.amount_cents, currency)}`
            : `${points.length} charges · hover a point`}
       </figcaption>
     </figure>
@@ -97,7 +117,16 @@ function Subscriptions({ rows }) {
   const [openId, setOpenId] = useState(null);
   const history = useApi(() => (openId ? api.history(openId) : Promise.resolve(null)),
                          [openId]);
-  const max = Math.max(...rows.map((r) => r.annual_cents), 1);
+  /* Each bar is drawn against the largest row *in its own currency*. One
+     shared maximum compared a yen figure with a dollar one, and since the
+     integers are in each currency's minor unit a ¥1,200 subscription
+     outweighed every dollar row on the screen. Nothing here converts, so
+     nothing here may compare. */
+  const max = new Map();
+  for (const r of rows) {
+    const c = (r.currency || "USD").toUpperCase();
+    max.set(c, Math.max(max.get(c) ?? 1, r.annual_cents));
+  }
 
   return (
     <table>
@@ -119,11 +148,12 @@ function Subscriptions({ rows }) {
                 {r.status !== "active" && <span className="pill" style={{ marginLeft: 8 }}>{r.status}</span>}
               </td>
               <td className="muted">{r.cadence}</td>
-              <td className="num">{money(r.current_amount_cents, r.currency, r.minor_digits)}</td>
-              <td className="num">{money(r.annual_cents, r.currency, r.minor_digits)}</td>
+              <td className="num">{money(r.current_amount_cents, r.currency)}</td>
+              <td className="num">{money(r.annual_cents, r.currency)}</td>
               <td className="bar-cell">
                 <div className="bar-track">
-                  <div className="bar-fill" style={{ width: `${(r.annual_cents / max) * 100}%` }} />
+                  <div className="bar-fill" style={{
+                    width: `${(r.annual_cents / max.get((r.currency || "USD").toUpperCase())) * 100}%` }} />
                 </div>
               </td>
               <td className="num muted">{Number(r.confidence).toFixed(2)}</td>
@@ -131,7 +161,8 @@ function Subscriptions({ rows }) {
             {openId === r.id && (
               <tr>
                 <td colSpan={6} style={{ paddingBottom: 18 }}>
-                  {history.data ? <PriceHistory points={history.data} title={r.merchant} />
+                  {history.data ? <PriceHistory points={history.data} title={r.merchant}
+                                                currency={r.currency} />
                                 : <span className="muted">loading…</span>}
                 </td>
               </tr>
@@ -197,10 +228,10 @@ function Dashboard({ me, onSignedOut }) {
                   Recurring spend{s.totals.length > 1 && <> · {t.currency}</>}
                 </div>
                 <div className="tile-value hero">
-                  {money(t.annual_minor, t.currency, t.minor_digits)}
+                  {money(t.annual_minor, t.currency)}
                 </div>
                 <div className="tile-note">
-                  per year · {money(t.monthly_minor, t.currency, t.minor_digits)}/mo
+                  per year · {money(t.monthly_minor, t.currency)}/mo
                 </div>
               </div>
               <div className="card">
@@ -217,7 +248,7 @@ function Dashboard({ me, onSignedOut }) {
                   color: t.price_increase_annual_minor > 0
                     ? "var(--status-critical)" : undefined }}>
                   {t.price_increase_annual_minor > 0 ? "+" : ""}
-                  {money(t.price_increase_annual_minor, t.currency, t.minor_digits)}
+                  {money(t.price_increase_annual_minor, t.currency)}
                 </div>
                 <div className="tile-note">added per year</div>
               </div>
@@ -239,11 +270,18 @@ function Dashboard({ me, onSignedOut }) {
                       <span>{money(r.current_amount_cents, r.currency)}</span>
                     </div>
                   ))}
-                  <div className="row" style={{ fontWeight: 650 }}>
-                    <span className="date"></span>
-                    <span className="grow">Total</span>
-                    <span>{money(upcoming.data.reduce((a, r) => a + r.current_amount_cents, 0))}</span>
-                  </div>
+                  {/* One total per currency. This line used to add them
+                      together and print the sum as dollars — the same
+                      meaningless-number-as-fact the API stopped doing, still
+                      being drawn a layer above it. */}
+                  {totalsByCurrency(upcoming.data, (r) => r.current_amount_cents)
+                    .map(([currency, total]) => (
+                      <div className="row" style={{ fontWeight: 650 }} key={currency}>
+                        <span className="date"></span>
+                        <span className="grow">Total</span>
+                        <span>{money(total, currency)}</span>
+                      </div>
+                    ))}
                 </>
               ) : <div className="empty">Nothing due in the next 30 days.</div>}
             </div>
@@ -288,14 +326,23 @@ function Dashboard({ me, onSignedOut }) {
                 return (
                   <div className="row" key={i}>
                     <span className="date">{day(r.effective_date)}</span>
-                    <span className="grow">{r.merchant}</span>
+                    <span className="grow">
+                      {r.merchant}
+                      {r.status !== "active" &&
+                        <span className="pill" style={{ marginLeft: 8 }}>{r.status}</span>}
+                    </span>
                     <span className="muted">
                       {money(r.old_amount_cents, r.currency)} → {money(r.new_amount_cents, r.currency)}
                     </span>
                     <span className={up ? "up" : "down"}
                           style={{ minWidth: 118, textAlign: "right" }}>
-                      {up ? "▲" : "▼"} {up ? "+" : ""}{Number(r.pct_change).toFixed(1)}% ·{" "}
-                      {money(r.annual_impact_cents, r.currency)}/yr
+                      {up ? "▲" : "▼"} {up ? "+" : ""}{Number(r.pct_change).toFixed(1)}%
+                      {/* The percentage is a fact about the past and stays.
+                          The yearly figure is a claim about money still going
+                          out, so a subscription that stopped charging does not
+                          get one. */}
+                      {r.status === "active" &&
+                        <> · {money(r.annual_impact_cents, r.currency)}/yr</>}
                     </span>
                   </div>
                 );
