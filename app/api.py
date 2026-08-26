@@ -33,6 +33,7 @@ from app import mailer
 from app import mcp_http
 from app import oauth
 from app import pipeline
+from app.limits import clear_attempts, client_ip, rate_limit
 from app.core import money
 from app.core.detect import CADENCES, USAGE_CV
 
@@ -100,40 +101,6 @@ async def security_headers(request: Request, call_next):
     if config.IS_PROD:
         r.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return r
-
-
-# ------------------------------------------------------------ rate limits --
-
-def client_ip(request: Request) -> str:
-    # Render terminates TLS and forwards; the leftmost entry is the client.
-    fwd = request.headers.get("x-forwarded-for", "")
-    return (fwd.split(",")[0].strip() if fwd
-            else (request.client.host if request.client else "unknown"))
-
-
-def rate_limit(kind: str, key: str) -> None:
-    """Counted in Postgres rather than in memory, because an in-process counter
-    resets on every deploy and is per-instance -- two instances would double
-    every limit, and a restart would clear a brute-force in progress."""
-    limit, window = config.LIMITS[kind]
-    with db.admin() as conn:
-        n = conn.execute(
-            "SELECT count(*) FROM auth_attempt WHERE key = %s AND kind = %s "
-            "AND at > now() - make_interval(secs => %s)",
-            (key, kind, window)).fetchone()[0]
-        if n >= limit:
-            conn.commit()
-            raise HTTPException(429, "Too many attempts. Try again later.")
-        conn.execute("INSERT INTO auth_attempt (key, kind) VALUES (%s, %s)",
-                     (key, kind))
-        conn.commit()
-
-
-def clear_attempts(kind: str, key: str) -> None:
-    with db.admin() as conn:
-        conn.execute("DELETE FROM auth_attempt WHERE key = %s AND kind = %s",
-                     (key, kind))
-        conn.commit()
 
 
 # --------------------------------------------------------------- session --

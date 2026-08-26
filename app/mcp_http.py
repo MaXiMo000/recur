@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 
 from app import auth
 from app import config
+from app.limits import client_ip, rate_limit
 from app import mcp_tools
 from app import oauth
 
@@ -84,7 +85,12 @@ class RegisterIn(BaseModel):
 
 
 @router.post("/oauth/register", status_code=201)
-def register_client(body: RegisterIn) -> dict:
+def register_client(request: Request, body: RegisterIn) -> dict:
+    # Unauthenticated by design, and it writes a permanent row. Every other
+    # unauthenticated endpoint in this service is counted in Postgres; this one
+    # was not, which made it a free write endpoint for anyone who could reach
+    # the host.
+    rate_limit("oauth_register", client_ip(request))
     try:
         return oauth.register_client(body.client_name, body.redirect_uris)
     except oauth.OAuthError as e:
@@ -161,6 +167,7 @@ def token(request: Request, grant_type: str = Form(...), code: str = Form(""),
           code_verifier: str = Form(""), resource: str = Form("")):
     if grant_type != "authorization_code":
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+    rate_limit("oauth_token", client_ip(request))
     try:
         result = oauth.exchange_code(code, client_id, redirect_uri, code_verifier,
                                      resource or resource_id(request))
