@@ -252,4 +252,21 @@ def purge_expired() -> None:
     with db.admin() as conn:
         conn.execute("DELETE FROM oauth_code WHERE expires_at < now()")
         conn.execute("DELETE FROM oauth_token WHERE expires_at < now()")
+        # Clients were never purged, so the one table anybody can write to grew
+        # forever: a registration that no human ever approved left a permanent
+        # row. Rate limiting bounds how fast that happens; this is what stops
+        # it being permanent.
+        #
+        # Only rows with nothing attached, and only after a month. A real
+        # client obtains a code within seconds of registering and a token
+        # within seconds of that, so anything still empty a month later was
+        # never used by anyone. Re-registration is the supported path for a
+        # public client that finds its id gone (RFC 7591 exists because these
+        # clients cannot pre-arrange credentials), so the worst case for a
+        # client that somehow reappears after a month of silence is one extra
+        # round trip, not a broken account.
+        conn.execute(
+            "DELETE FROM oauth_client c WHERE c.created_at < now() - interval '30 days'"
+            " AND NOT EXISTS (SELECT 1 FROM oauth_token t WHERE t.client_id = c.client_id)"
+            " AND NOT EXISTS (SELECT 1 FROM oauth_code k WHERE k.client_id = c.client_id)")
         conn.commit()

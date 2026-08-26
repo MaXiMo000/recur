@@ -97,6 +97,16 @@ LIMITS = {
     "register": (5, 3600),
     "reset": (5, 3600),
     "upload": (20, 3600),
+    # Dynamic client registration is unauthenticated by design -- an MCP client
+    # the user has just installed has no way to pre-arrange credentials -- and
+    # it writes a permanent row per call. Ten an hour per address is more than
+    # any real client needs (one, once) and stops the table being a free write
+    # endpoint for anyone who can reach the host.
+    "oauth_register": (10, 3600),
+    # Codes are 32 random bytes and single-use, so this is not guessing
+    # defence; it is the same bound every other unauthenticated endpoint here
+    # already has.
+    "oauth_token": (60, 3600),
 }
 
 _PROD_REQUIREMENTS = [

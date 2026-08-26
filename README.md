@@ -211,6 +211,14 @@ goes in when something appears that a model could resolve and the queue cannot.
   name. A descriptor is attacker-controlled text; a tool description is read by
   the model as instructions. `test_mcp.py` asserts it.
 - Every grant is listable and revocable by the user.
+- **The open endpoints are counted like every other open endpoint.** Dynamic
+  registration has to be unauthenticated — an MCP client the user just
+  installed cannot pre-arrange credentials — and it writes a permanent row, so
+  it was the one unauthenticated endpoint here with no limit at all. Ten
+  registrations an hour per address, in the same Postgres counter the login
+  path uses, and a registration that never obtained a code or a token is
+  purged after a month. Rate limiting bounds how fast that table grows;
+  purging is what stops the growth being permanent.
 
 The stdio server still exists for local use: no OAuth round trip to reach a
 database on your own machine, and no network surface to attack.

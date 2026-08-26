@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app import api
 from app import auth
+from app import config
 from app import db
 from app import oauth
 
@@ -165,6 +166,58 @@ def main() -> None:
             conn.execute("DELETE FROM oauth_client")
             conn.commit()
 
+    # --- the endpoints anyone can reach are counted, like every other one
+    #
+    # /oauth/register is unauthenticated by design and writes a permanent row,
+    # and it was the one unauthenticated endpoint in the service with no limit
+    # at all -- a free write endpoint for anybody who could reach the host.
+    with db.admin() as conn:
+        conn.execute("DELETE FROM auth_attempt WHERE kind LIKE 'oauth%'")
+        conn.commit()
+    with TestClient(api.app) as c:
+        limit = config.LIMITS["oauth_register"][0]
+        codes = [
+            c.post("/oauth/register",
+                   json={"client_name": "flood",
+                         "redirect_uris": ["https://example.test/cb"]}).status_code
+            for _ in range(limit + 3)
+        ]
+        check("registration is allowed up to the limit",
+              codes[:limit], [201] * limit)
+        check("and refused after it", set(codes[limit:]), {429})
+
+    # --- and a registration nobody ever used does not live forever
+    #
+    # Rate limiting bounds how fast the table grows; purging is what stops the
+    # growth being permanent. Only rows with no code and no token attached, and
+    # only after a month, so a client in use is never touched.
+    with db.admin() as conn:
+        conn.execute("DELETE FROM auth_attempt WHERE kind LIKE 'oauth%'")
+        conn.commit()
+    with TestClient(api.app) as c:
+        stale = c.post("/oauth/register",
+                       json={"client_name": "abandoned",
+                             "redirect_uris": ["https://example.test/cb"]}).json()["client_id"]
+        fresh = c.post("/oauth/register",
+                       json={"client_name": "recent",
+                             "redirect_uris": ["https://example.test/cb"]}).json()["client_id"]
+    # Its own user: the one registered at the top of this file is erased by an
+    # earlier block, and oauth_token has a foreign key onto app_user.
+    holder, _ = auth.register("purge@example.com", PW)
+    with db.admin() as conn:
+        conn.execute("UPDATE oauth_client SET created_at = now() - interval '40 days'"
+                     " WHERE client_id IN (%s, %s)", (stale, fresh))
+        # `fresh` has a live token, so age alone must not be enough to remove it.
+        conn.execute(
+            "INSERT INTO oauth_token (token_hash, client_id, user_id, scope, audience,"
+            " expires_at) VALUES (%s, %s, %s, 'recur:read', 'x', now() + interval '1 day')",
+            (secrets.token_hex(16), fresh, holder))
+        conn.commit()
+    oauth.purge_expired()
+    check("an abandoned registration is purged", oauth.get_client(stale), None)
+    check("one still holding a token is not",
+          oauth.get_client(fresh) is not None, True)
+
     if FAILURES:
         print(f"FAIL ({len(FAILURES)})")
         print("\n".join(FAILURES))
@@ -172,7 +225,7 @@ def main() -> None:
     # A floor, not a target. test_auth and test_pipeline each printed a
     # hardcoded count two higher than they actually ran, so checks had been
     # deleted at some point and the number never moved.
-    FLOOR = 28
+    FLOOR = 32
     if CHECKS[0] < FLOOR:
         raise SystemExit(f"checks shrank: {CHECKS[0]} < {FLOOR} -- check git diff.")
 
