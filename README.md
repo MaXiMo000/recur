@@ -5,8 +5,12 @@
 Find out what you're actually paying for. Upload a bank CSV, get the truth about
 your recurring charges: what renews, what quietly went up, what hits next week.
 
-**No bank credentials. No Plaid. No OAuth.** You download a CSV yourself and the
-data stays on your machine. This system has nowhere to put a bank password.
+**No bank credentials. No Plaid. No OAuth to your bank.** You download a CSV
+yourself — this system has nowhere to put a bank password, in either mode
+below. Run it locally (`app/core/` + stdio MCP) and the data never leaves
+your machine. Use the hosted deployment instead and it's the same
+credential-free CSV upload, but the parsed transactions are stored in that
+deployment's managed Postgres, not on your machine — see "Status" below.
 
 ---
 
