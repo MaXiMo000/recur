@@ -288,7 +288,7 @@ def _as_of(uid: int) -> date:
 @app.post("/api/upload")
 async def upload(request: Request, file: UploadFile = File(...),
                  account: str = Form("card"), dayfirst: bool = Form(False),
-                 currency: str = Form("USD"),
+                 currency: str = Form("USD"), flip_sign: bool | None = Form(None),
                  uid: int = Depends(current_user)) -> dict:
     rate_limit("upload", str(uid))
     if not (file.filename or "").lower().endswith((".csv", ".txt", ".tsv")):
@@ -305,8 +305,15 @@ async def upload(request: Request, file: UploadFile = File(...),
         # Validated, not truncated. `[:3]` turned "US" into "US" and stored it,
         # and a code that is not three letters raises in Intl.NumberFormat --
         # so the next render of the dashboard threw instead of drawing.
+        # flip_sign defaults to None -- ingest.load()'s own auto-detection --
+        # rather than to False, so a caller that omits the field entirely
+        # keeps today's behaviour exactly. Explicit only overrides a guess
+        # nobody had a way to correct: the response already names the guess
+        # ("sign_flipped"), but there was no way to say "that's wrong" short
+        # of deleting the account and starting over.
         return pipeline.run(uid, raw, account.strip()[:64] or "card",
-                            dayfirst=dayfirst, currency=money.normalise(currency),
+                            dayfirst=dayfirst, flip_sign=flip_sign,
+                            currency=money.normalise(currency),
                             source=(file.filename or "upload")[:120])
     except ValueError as e:
         raise HTTPException(400, str(e))

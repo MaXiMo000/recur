@@ -162,6 +162,28 @@ one keystroke took down every render of the dashboard until the account was
 deleted. Three ASCII letters or a 400, checked at the boundary where the value
 enters.
 
+## Which amounts are charges is a guess, and guesses need a way to be wrong
+
+`looks_flipped()` reads most banks correctly (negative = charge) and flips for
+Amex-style exports (positive = charge) by majority vote over the file. It used
+to have no way to be overridden and no way to be corrected: the upload form
+had no control for it, the guess was reported after the fact in one line of
+text easy to miss, and even someone who noticed a wrong guess had no path back
+— re-uploading the same file with a different setting doesn't replace the
+wrongly-signed rows, it adds a second copy of them with the opposite sign,
+because deduplication is keyed on the amount along with the date and
+descriptor.
+
+The upload form now has an explicit control (`auto` / `positive is charges` /
+`negative is charges`), defaulting to auto-detection so nobody who doesn't
+care about this has to. An explicit choice is made *before* anything is
+stored, which is the only point in this flow where getting it right is free.
+The result banner still says which way it went, in a warning colour rather
+than a note, and says plainly that fixing a wrong guess needs deleting the
+account and starting over — because that is genuinely the only safe path
+today, and a UI that implied re-uploading would fix it would be worse than
+one that says nothing.
+
 ## Tier 3 (embeddings) was built, measured, and removed
 
 The merchant resolution ladder stops at a real ceiling: `AWS` and `AMAZON WEB

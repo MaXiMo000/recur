@@ -78,12 +78,16 @@ export const api = {
       body: { queue_id: queueId, merchant, ignore },
     }),
 
-  upload: (file, { account = "card", dayfirst = false, currency = "USD" } = {}) => {
+  // flipSign: undefined/null keeps the field off the request entirely, so the
+  // server falls back to its own auto-detection -- today's behaviour,
+  // unchanged for anyone who doesn't touch the new control.
+  upload: (file, { account = "card", dayfirst = false, currency = "USD", flipSign } = {}) => {
     const form = new FormData();
     form.append("file", file);
     form.append("account", account);
     form.append("dayfirst", String(dayfirst));
     form.append("currency", currency);
+    if (flipSign !== undefined && flipSign !== null) form.append("flip_sign", String(flipSign));
     return request("/api/upload", { method: "POST", form });
   },
 };

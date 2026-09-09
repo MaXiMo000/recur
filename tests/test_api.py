@@ -44,6 +44,14 @@ CSV_B = b"""Date,Description,Amount
 """
 
 
+# Amex-style: charges positive, a payment negative. Auto-detects as flipped.
+CSV_MOSTLY_POSITIVE = b"""Date,Description,Amount
+01/03/2026,SOME MERCHANT,19.99
+02/03/2026,SOME MERCHANT,19.99
+03/03/2026,SOME MERCHANT,19.99
+04/03/2026,PAYMENT - THANK YOU,-200.00
+"""
+
 CSV_JPY = b"""Date,Description,Amount
 06/05/2026,NINTENDO ONLINE TOKYO,-1200
 07/05/2026,NINTENDO ONLINE TOKYO,-1200
@@ -220,6 +228,25 @@ def main() -> None:
         r = a.post("/api/upload",
                    files={"file": ("x.exe", io.BytesIO(CSV_A), "application/octet-stream")})
         check("non-CSV extension refused", r.status_code, 400)
+
+        # --- flip_sign: a guess that used to be silent and final
+        r = a.post("/api/upload",
+                   files={"file": ("flip-auto.csv", io.BytesIO(CSV_MOSTLY_POSITIVE), "text/csv")},
+                   data={"account": "alice-flip-auto"})
+        check("omitting flip_sign keeps auto-detection: this file flips",
+              r.json()["sign_flipped"], True)
+
+        r = a.post("/api/upload",
+                   files={"file": ("flip-override.csv", io.BytesIO(CSV_MOSTLY_POSITIVE), "text/csv")},
+                   data={"account": "alice-flip-override", "flip_sign": "false"})
+        check("an explicit override wins over the auto-detected guess",
+              r.json()["sign_flipped"], False)
+
+        r = a.post("/api/upload",
+                   files={"file": ("noflip-override.csv", io.BytesIO(CSV_A), "text/csv")},
+                   data={"account": "alice-noflip-override", "flip_sign": "true"})
+        check("an explicit override also works in the other direction",
+              r.json()["sign_flipped"], True)
 
         # --- logout really ends it
         a.post("/api/auth/logout")

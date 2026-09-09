@@ -8,11 +8,24 @@ import { api } from "./api";
  * understated, with nothing on screen explaining why. */
 
 
+// "auto" leaves flip_sign off the request so the server guesses, same as
+// before this control existed. "yes"/"no" are an explicit, informed choice
+// made before anything is stored -- not a way to correct a wrong guess after
+// the fact: re-uploading the same file with a different setting stores the
+// rows a second time with the opposite sign rather than replacing anything,
+// because dedup treats a different amount as a different transaction.
+const SIGN_OPTIONS = [
+  { value: "auto", label: "Auto-detect (recommended)" },
+  { value: "no", label: "Negative amounts are charges (most banks)" },
+  { value: "yes", label: "Positive amounts are charges (Amex-style)" },
+];
+
 export function Upload({ onLoaded }) {
   const [file, setFile] = useState(null);
   const [account, setAccount] = useState("card");
   const [dayfirst, setDayfirst] = useState(false);
   const [currency, setCurrency] = useState("USD");
+  const [signMode, setSignMode] = useState("auto");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -22,7 +35,8 @@ export function Upload({ onLoaded }) {
     if (!file) return;
     setBusy(true); setError(null); setResult(null);
     try {
-      const r = await api.upload(file, { account, dayfirst, currency });
+      const flipSign = signMode === "auto" ? undefined : signMode === "yes";
+      const r = await api.upload(file, { account, dayfirst, currency, flipSign });
       setResult(r);
       onLoaded?.();
     } catch (err) {
@@ -69,6 +83,16 @@ export function Upload({ onLoaded }) {
           {/* No auto-detection: 08/03 is ambiguous and guessing wrong is silent. */}
           <span>Dates are day/month (outside the US)</span>
         </label>
+        <label className="field">
+          <span>Which amounts are charges?</span>
+          {/* Unlike dayfirst, this one does auto-detect -- the guess is right
+              often enough to default to it -- but the guess used to be
+              entirely silent and entirely final. Uploading is checked before
+              a guess is trusted with money still on it. */}
+          <select value={signMode} onChange={(e) => setSignMode(e.target.value)}>
+            {SIGN_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </label>
         <button className="primary" type="submit" disabled={busy || !file}>
           {busy ? "Reading…" : "Upload"}
         </button>
@@ -83,8 +107,14 @@ export function Upload({ onLoaded }) {
             <strong>{result.rows_new.toLocaleString()}</strong> new
             {result.rows_duplicate > 0 &&
               <> · {result.rows_duplicate.toLocaleString()} already present</>}
-            {result.sign_flipped &&
-              <> · treated positive amounts as charges</>}
+          </p>
+          <p className={result.sign_flipped ? "warn" : "muted"}>
+            {result.sign_flipped
+              ? "Treated positive amounts as charges. If that's wrong, this " +
+                "account can't be corrected by re-uploading — delete your " +
+                "account below and start over with the setting above set " +
+                "explicitly."
+              : "Treated negative amounts as charges."}
           </p>
           <p>
             Found <strong>{result.subscriptions_found}</strong> recurring charges.
