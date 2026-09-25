@@ -16,3 +16,4 @@ backups/
 
 # macOS writes these into every directory it opens.
 .DS_Store
+*.egg-info/
