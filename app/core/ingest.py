@@ -26,10 +26,11 @@ from app.core.money import minor_units, to_minor
 from app.core.scrub import scrub
 
 _DATE_FORMATS_US = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y",
-                    "%Y/%m/%d", "%d-%b-%Y", "%b %d, %Y", "%d %b %Y",
-                    "%d.%m.%Y")
-_DATE_FORMATS_INTL = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y",
-                      "%d.%m.%Y", "%d.%m.%y", "%Y/%m/%d", "%d-%b-%Y", "%d %b %Y")
+                    "%Y/%m/%d", "%d-%b-%Y", "%d-%b-%y", "%b %d, %Y", "%d %b %Y",
+                    "%d %b %y", "%d.%m.%Y")
+_DATE_FORMATS_INTL = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y", "%d-%m-%y",
+                      "%d.%m.%Y", "%d.%m.%y", "%Y/%m/%d", "%d-%b-%Y", "%d-%b-%y",
+                      "%d %b %Y", "%d %b %y", "%d/%b/%Y")
 
 
 # --------------------------------------------------------------------------- #
@@ -42,7 +43,7 @@ _DATE_FORMATS_INTL = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y",
 DATE_WORDS = ("date", "datum", "fecha", "data", "dato", "tarih", "päivä",
               "buchung", "valuta")
 DESC_WORDS = ("description", "beschreibung", "verwendungszweck", "buchungstext",
-              "merchant", "payee", "narrative", "details", "concepto",
+              "merchant", "payee", "narration", "narrative", "remarks", "details", "concepto",
               "descrizione", "omschrijving", "libellé", "libelle", "tekst",
               "opis", "name", "particulars")
 AMOUNT_WORDS = ("amount", "betrag", "importe", "importo", "montant", "bedrag",
@@ -133,65 +134,149 @@ def parse_date(raw: str, dayfirst: bool):
     return None
 
 
+DEBIT_EXACT = ("dr", "dr.", "w/d")     # whole-header only: "dr" is inside "address"
+CREDIT_EXACT = ("cr", "cr.")
+INDICATOR_VALUES = {"dr", "cr", "d", "c", "debit", "credit"}
+MONEY_EXCLUDE = ("running", "balance", "saldo", "solde", "bal")
+
+
+def _exact(headers: list[str], names: tuple) -> str | None:
+    for h in headers:
+        if h.strip().lower() in names:
+            return h
+    return None
+
+
+def _columns(headers: list[str]) -> dict:
+    """Which header is which, or {} if these can't be a transaction table's
+    headers. Pure: used both to find the header row and to read it."""
+    # "Post Date" beats "Transaction Date" -- posting is when it hit the card.
+    date_col = pick_column(headers, "post date", "posted", *DATE_WORDS)
+    desc_col = pick_column(headers, *DESC_WORDS, exclude=("date",))
+    debit_col = (_exact(headers, DEBIT_EXACT)
+                 or pick_column(headers, *DEBIT_WORDS, exclude=MONEY_EXCLUDE))
+    credit_col = (_exact(headers, CREDIT_EXACT)
+                  or pick_column(headers, *CREDIT_WORDS, exclude=MONEY_EXCLUDE))
+    # A "Withdrawal Amount (INR)" header contains "amount" too. Taken as the
+    # one amount column, it silently dropped every deposit: debit and
+    # credit headers are never the single amount column.
+    # And "value" (an amount word in European exports) is also in HDFC's
+    # "Value Dt" -- a date. Date-like headers are never the amount.
+    amt_col = pick_column(headers, *AMOUNT_WORDS,
+                          exclude=MONEY_EXCLUDE + DEBIT_WORDS + CREDIT_WORDS + ("date", "value dt"))
+    if not date_col or not desc_col or not (amt_col or debit_col):
+        return {}
+    return {"date": date_col, "desc": desc_col, "amount": amt_col,
+            "debit": debit_col, "credit": credit_col}
+
+
+def _indicator_column(rows: list[dict], headers: list[str], skip: set) -> str | None:
+    """A column whose every non-empty value is DR/CR (or D/C, Debit/Credit):
+    the sign of an always-positive amount column, in exports that split
+    them (common in Indian bank statements)."""
+    for h in headers:
+        if h in skip:
+            continue
+        values = {(r.get(h) or "").strip().lower().rstrip(".") for r in rows[:200]} - {""}
+        if values and values <= INDICATOR_VALUES:
+            return h
+    return None
+
+
+def _needs_dayfirst(values: list[str]) -> bool:
+    """True only when month-first is impossible: some date doesn't parse
+    that way ("25/09/2026") and every one parses day-first. When both
+    readings work (01/03/2026), nothing here overrides the caller's flag."""
+    values = [v for v in values if v and v.strip()]
+    if not values:
+        return False
+    us_fails = any(parse_date(v, dayfirst=False) is None for v in values)
+    intl_ok = all(parse_date(v, dayfirst=True) is not None for v in values)
+    return us_fails and intl_ok
+
+
 def read_rows(fh, dayfirst: bool, flip_sign: bool, verbose: bool = True,
               currency: str = "USD"):
     """Yield (posted_date, amount_cents, descriptor). Negative = money out.
 
     Takes an open text stream rather than a path, so an uploaded file can be
     parsed straight out of memory and never has to touch the server's disk.
+
+    Real exports aren't always a clean table: many banks put an account
+    summary above the header row. The header is the first of the opening
+    lines that has a date column, a description column and an amount (or
+    debit) column; everything above it is skipped.
     """
-    if True:
-        sample = fh.read(8192)
-        fh.seek(0)
-        try:
-            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        except csv.Error:
-            dialect = csv.excel
-        reader = csv.DictReader(fh, dialect=dialect)
-        headers = [h for h in (reader.fieldnames or []) if h]
-        if not headers:
+    text = fh.read()
+    fh.seek(0)
+    lines = text.splitlines()
+    try:
+        dialect = csv.Sniffer().sniff("\n".join(lines[:60])[:16384], delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+
+    start, cols, headers = None, {}, []
+    for i, row in enumerate(csv.reader(lines[:60], dialect)):
+        candidate = [h.strip() for h in row if h and h.strip()]
+        cols = _columns(candidate)
+        if cols:
+            start, headers = i, candidate
+            break
+    if start is None:
+        first = next(csv.reader(lines[:1], dialect), [])
+        if not [h for h in first if h and h.strip()]:
             raise ValueError("No header row found in the CSV.")
+        raise ValueError(
+            "Could not find date, description and amount columns in the first "
+            f"lines of the file. Saw: {[h.strip() for h in first if h]}")
 
-        # "Post Date" beats "Transaction Date" -- posting is when it hit the card.
-        date_col = pick_column(headers, "post date", "posted", *DATE_WORDS)
-        desc_col = pick_column(headers, *DESC_WORDS)
-        amt_col = pick_column(headers, *AMOUNT_WORDS,
-                              exclude=("running", "balance", "saldo", "solde"))
-        debit_col = pick_column(headers, *DEBIT_WORDS)
-        credit_col = pick_column(headers, *CREDIT_WORDS)
+    reader = csv.DictReader(lines[start:], dialect=dialect)
+    reader.fieldnames = [(h or "").strip() for h in (reader.fieldnames or [])]
+    rows = list(reader)
 
-        if not date_col or not desc_col:
-            raise ValueError(
-                f"Could not find date and description columns. Saw: {headers}")
-        if not amt_col and not debit_col:
-            raise ValueError(
-                f"Could not find an amount or debit column. Saw: {headers}")
+    indicator = None
+    if cols["amount"] is None and cols["debit"] and not cols["credit"]:
+        # One money column named like a debit ("Debit/Credit") plus a DR/CR
+        # column: the money column is the amount, the other gives the sign.
+        indicator = _indicator_column(rows, headers, {cols["date"], cols["desc"], cols["debit"]})
+        if indicator:
+            cols["amount"], cols["debit"] = cols["debit"], None
+    elif cols["amount"]:
+        indicator = _indicator_column(rows, headers, {cols["date"], cols["desc"], cols["amount"]})
 
-        if verbose:
-            print(f"columns -> date={date_col!r} desc={desc_col!r} "
-                  f"amount={amt_col or f'{debit_col}/{credit_col}'!r}")
+    if not dayfirst and _needs_dayfirst([r.get(cols["date"], "") for r in rows[:500]]):
+        dayfirst = True
 
-        skipped = 0
-        for row in reader:
-            when = parse_date(row.get(date_col, ""), dayfirst)
-            desc = (row.get(desc_col) or "").strip()
+    if verbose:
+        money = cols["amount"] or f"{cols['debit']}/{cols['credit']}"
+        print(f"columns -> date={cols['date']!r} desc={cols['desc']!r} amount={money!r}"
+              + (f" sign={indicator!r}" if indicator else "")
+              + (" (day-first dates)" if dayfirst else ""))
 
-            if debit_col and not amt_col:
-                debit = parse_amount(row.get(debit_col, ""), currency)
-                credit = parse_amount(row.get(credit_col, ""), currency) if credit_col else None
-                cents = -abs(debit) if debit else (abs(credit) if credit else None)
-            else:
-                cents = parse_amount(row.get(amt_col, ""), currency)
-                if cents is not None and flip_sign:
-                    cents = -cents
+    skipped = 0
+    for row in rows:
+        when = parse_date(row.get(cols["date"], ""), dayfirst)
+        desc = (row.get(cols["desc"]) or "").strip()
 
-            if when is None or cents is None or not desc:
-                skipped += 1
-                continue
-            yield when, cents, desc
+        if cols["amount"]:
+            cents = parse_amount(row.get(cols["amount"], ""), currency)
+            if cents is not None and indicator:
+                mark = (row.get(indicator) or "").strip().lower().rstrip(".")
+                cents = -abs(cents) if mark in ("dr", "d", "debit") else abs(cents)
+            elif cents is not None and flip_sign:
+                cents = -cents
+        else:
+            debit = parse_amount(row.get(cols["debit"], ""), currency)
+            credit = parse_amount(row.get(cols["credit"], ""), currency) if cols["credit"] else None
+            cents = -abs(debit) if debit else (abs(credit) if credit else None)
 
-        if skipped and verbose:
-            print(f"skipped {skipped} unparseable rows (blank/summary lines)")
+        if when is None or cents is None or not desc:
+            skipped += 1
+            continue
+        yield when, cents, desc
+
+    if skipped and verbose:
+        print(f"skipped {skipped} unparseable rows (blank/summary lines)")
 
 
 def looks_flipped(fh, dayfirst: bool, currency: str = "USD") -> bool:

@@ -201,6 +201,29 @@ one keystroke took down every render of the dashboard until the account was
 deleted. Three ASCII letters or a 400, checked at the boundary where the value
 enters.
 
+## Which bank exports it reads
+
+No per-bank list to keep up to date: columns are found by what they're
+called, in the languages statements arrive in, and the layouts banks
+actually use are handled as rules:
+
+- **A summary above the table** (account number, period, opening balance)
+  is skipped: the header is the first of the opening rows that has a date,
+  a description and an amount or debit column.
+- **One signed amount column** (`Amount`, `Betrag`, `Montant`, ...), or
+  **separate debit and credit columns** (`Withdrawal Amt.` / `Deposit Amt.`,
+  `Debit` / `Credit`, bare `DR` / `CR`), or **an always-positive amount plus
+  a DR/CR column** that gives the sign.
+- **Description** under any of the usual names, including `Narration` and
+  `Transaction Remarks` (Indian bank exports) as well as `Payee`,
+  `Particulars`, `Verwendungszweck`, `Libellé`.
+- **Day-first dates** (`25/09/2026`, `25-Sep-26`) are detected when a date
+  can't be month-first. When every date reads both ways (`01/03/2026`), the
+  day-first setting decides -- it's never guessed.
+- A `Withdrawal Amount` or `Value Dt` header is never mistaken for the
+  one amount column. Both were real ways to silently drop every deposit, or
+  read a date as money.
+
 ## Which amounts are charges is a guess, and guesses need a way to be wrong
 
 `looks_flipped()` reads most banks correctly (negative = charge) and flips for
